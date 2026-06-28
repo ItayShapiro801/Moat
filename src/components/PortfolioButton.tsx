@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { getSupabaseClient } from "@/lib/supabase/client";
 
@@ -62,7 +63,7 @@ export function PortfolioButton({ ticker }: { ticker: string }) {
     setError(null);
     try {
       // Current price now
-      const res = await fetch(`http://localhost:8000/analyze/${ticker}`);
+      const res = await fetch(`${API_BASE_URL}/analyze/${ticker}`);
       if (!res.ok) throw new Error();
       const d = await res.json();
       const nativePrice = d.current_price;
@@ -73,7 +74,7 @@ export function PortfolioButton({ ticker }: { ticker: string }) {
       let rate = 1;
       if (currency !== "USD") {
         try {
-          const fx = await fetch(`http://localhost:8000/fx-rate?base=${currency}`).then((r) => r.json());
+          const fx = await fetch(`${API_BASE_URL}/fx-rate?base=${currency}`).then((r) => r.json());
           if (fx.rate_to_usd && fx.rate_to_usd > 0) rate = fx.rate_to_usd;
         } catch {
           /* fall back to 1:1 */

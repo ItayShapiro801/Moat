@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { Card } from "./ui/Card";
 import {
   LineChart,
@@ -30,7 +31,7 @@ export function PEChart({ ticker, currentPE }: PEChartProps) {
 
   useEffect(() => {
     setLoading(true);
-    fetch(`http://localhost:8000/financials/${ticker}`)
+    fetch(`${API_BASE_URL}/financials/${ticker}`)
       .then((r) => r.json())
       .then((fin) => {
         const eps: { year: string; value: number }[] = fin.eps || [];
@@ -39,7 +40,7 @@ export function PEChart({ ticker, currentPE }: PEChartProps) {
           return;
         }
         return fetch(
-          `http://localhost:8000/price-history/${ticker}?period=max`
+          `${API_BASE_URL}/price-history/${ticker}?period=max`
         )
           .then((r2) => r2.json())
           .then((ph) => {

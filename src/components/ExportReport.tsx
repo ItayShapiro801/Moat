@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { jsPDF } from "jspdf";
 // html2canvas-pro supports modern CSS color functions (lab/oklch) that the
 // original html2canvas chokes on with Tailwind v4.
@@ -57,12 +58,12 @@ export function ExportReport({
   async function buildPdf(): Promise<jsPDF> {
     // Fetch supplementary data for the report
     const [metricsRes, investorsRes, thesisRes, deepRes] = await Promise.allSettled([
-      fetch(`http://localhost:8000/metrics/${ticker}`).then((r) => r.json()),
-      fetch(`http://localhost:8000/investors/${ticker}`).then((r) => r.json()),
-      fetch(`http://localhost:8000/thesis/${ticker}`).then((r) => r.json()),
+      fetch(`${API_BASE_URL}/metrics/${ticker}`).then((r) => r.json()),
+      fetch(`${API_BASE_URL}/investors/${ticker}`).then((r) => r.json()),
+      fetch(`${API_BASE_URL}/thesis/${ticker}`).then((r) => r.json()),
       // Deep research is cached server-side; included if available (instant when
       // the user already generated it, otherwise generated on demand).
-      fetch(`http://localhost:8000/deep-research/${ticker}`).then((r) => r.json()),
+      fetch(`${API_BASE_URL}/deep-research/${ticker}`).then((r) => r.json()),
     ]);
     const metrics = metricsRes.status === "fulfilled" ? metricsRes.value : null;
     const investors: Investor[] =
@@ -389,7 +390,7 @@ export function ExportReport({
     try {
       const doc = await buildPdf();
       const dataUri = doc.output("datauristring");
-      const res = await fetch("http://localhost:8000/email-report", {
+      const res = await fetch(`${API_BASE_URL}/email-report`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ to_email: to, ticker, pdf_base64: dataUri }),

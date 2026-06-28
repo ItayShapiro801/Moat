@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { TickerSearch } from "@/components/ui/TickerSearch";
@@ -30,15 +31,15 @@ function ratingVariant(rec: string | null): "success" | "warning" | "danger" | "
 
 async function loadTicker(ticker: string): Promise<CompareData> {
   // analyze is the essential data — if it fails, treat the whole column as failed.
-  const aRes = await fetch(`http://localhost:8000/analyze/${ticker}`);
+  const aRes = await fetch(`${API_BASE_URL}/analyze/${ticker}`);
   if (!aRes.ok) throw new Error("analyze failed");
   const a = await aRes.json();
   // Compare relies on DCF / F-Score / investor cards — none apply to ETFs,
   // crypto or indices. Reject non-equities (handles a typed-Enter bypass).
   if (a.quote_type && a.quote_type !== "EQUITY") throw new Error("NON_EQUITY");
   const [metricsRes, investorsRes] = await Promise.allSettled([
-    fetch(`http://localhost:8000/metrics/${ticker}`).then((r) => r.json()),
-    fetch(`http://localhost:8000/investors/${ticker}`).then((r) => r.json()),
+    fetch(`${API_BASE_URL}/metrics/${ticker}`).then((r) => r.json()),
+    fetch(`${API_BASE_URL}/investors/${ticker}`).then((r) => r.json()),
   ]);
   const m = metricsRes.status === "fulfilled" ? metricsRes.value : {};
   const inv = investorsRes.status === "fulfilled" ? investorsRes.value.investors || [] : [];

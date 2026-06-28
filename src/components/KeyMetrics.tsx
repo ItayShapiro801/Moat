@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { Card } from "./ui/Card";
 import { Badge } from "./ui/Badge";
 
@@ -118,7 +119,7 @@ export function KeyMetrics({
 
   useEffect(() => {
     setLoading(true);
-    fetch(`http://localhost:8000/metrics/${ticker}`)
+    fetch(`${API_BASE_URL}/metrics/${ticker}`)
       .then((r) => r.json())
       .then(setData)
       .catch(() => setData(null))

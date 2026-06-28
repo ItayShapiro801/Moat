@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { Card } from "./ui/Card";
 import { Badge } from "./ui/Badge";
 
@@ -38,7 +39,7 @@ export function InvestorCards({ ticker }: { ticker: string }) {
   function load(refresh = false) {
     setLoading(true);
     setError(false);
-    fetch(`http://localhost:8000/investors/${ticker}${refresh ? "?refresh=true" : ""}`)
+    fetch(`${API_BASE_URL}/investors/${ticker}${refresh ? "?refresh=true" : ""}`)
       .then((r) => {
         if (!r.ok) throw new Error();
         return r.json();

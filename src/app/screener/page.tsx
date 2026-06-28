@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
@@ -40,7 +41,7 @@ export default function ScreenerPage() {
   const load = useCallback(() => {
     setLoading(true);
     fetch(
-      `http://localhost:8000/screener?min_margin_of_safety=${minMos}&min_f_score=${minFScore}`
+      `${API_BASE_URL}/screener?min_margin_of_safety=${minMos}&min_f_score=${minFScore}`
     )
       .then((r) => r.json())
       .then((d) => {

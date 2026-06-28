@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { Card } from "./ui/Card";
 
 interface ThesisData {
@@ -28,7 +29,7 @@ export function CompanyThesis({
   function load(refresh = false) {
     setLoading(true);
     setError(false);
-    fetch(`http://localhost:8000/thesis/${ticker}${refresh ? "?refresh=true" : ""}`)
+    fetch(`${API_BASE_URL}/thesis/${ticker}${refresh ? "?refresh=true" : ""}`)
       .then((r) => {
         if (!r.ok) throw new Error();
         return r.json();

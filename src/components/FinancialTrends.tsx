@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { Card } from "./ui/Card";
 import { Badge } from "./ui/Badge";
 import {
@@ -72,7 +73,7 @@ export function FinancialTrends({ ticker }: { ticker: string }) {
 
   useEffect(() => {
     setLoading(true);
-    fetch(`http://localhost:8000/financials/${ticker}`)
+    fetch(`${API_BASE_URL}/financials/${ticker}`)
       .then((r) => r.json())
       .then(setData)
       .catch(() => setData(null))

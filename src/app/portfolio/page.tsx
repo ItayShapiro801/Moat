@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import Link from "next/link";
 import {
   PieChart,
@@ -40,7 +41,7 @@ async function getFxRate(currency: string, cache: Record<string, number>): Promi
   if (currency === "USD") return 1;
   if (cache[currency] != null) return cache[currency];
   try {
-    const r = await fetch(`http://localhost:8000/fx-rate?base=${currency}`).then((x) => x.json());
+    const r = await fetch(`${API_BASE_URL}/fx-rate?base=${currency}`).then((x) => x.json());
     const rate = r.rate_to_usd && r.rate_to_usd > 0 ? r.rate_to_usd : 1;
     cache[currency] = rate;
     return rate;
@@ -92,7 +93,7 @@ export default function PortfolioPage() {
         const currency = (h.currency as string) || "USD";
         const quote_type = (h.quote_type as string) || "EQUITY";
         try {
-          const res = await fetch(`http://localhost:8000/analyze/${ticker}`);
+          const res = await fetch(`${API_BASE_URL}/analyze/${ticker}`);
           if (!res.ok) throw new Error();
           const d = await res.json();
           const current_price = d.current_price || 0; // native currency
@@ -161,7 +162,7 @@ export default function PortfolioPage() {
     setAdding(true);
     setAddError(null);
     try {
-      const res = await fetch(`http://localhost:8000/analyze/${pendingTicker}`);
+      const res = await fetch(`${API_BASE_URL}/analyze/${pendingTicker}`);
       if (!res.ok) throw new Error();
       const d = await res.json();
       const nativePrice = d.current_price;
@@ -170,7 +171,7 @@ export default function PortfolioPage() {
       let rate = 1;
       if (currency !== "USD") {
         try {
-          const fx = await fetch(`http://localhost:8000/fx-rate?base=${currency}`).then((r) => r.json());
+          const fx = await fetch(`${API_BASE_URL}/fx-rate?base=${currency}`).then((r) => r.json());
           if (fx.rate_to_usd && fx.rate_to_usd > 0) rate = fx.rate_to_usd;
         } catch {
           /* 1:1 fallback */

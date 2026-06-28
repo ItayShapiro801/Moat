@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { Card } from "./ui/Card";
 import { getSupabaseClient } from "@/lib/supabase/client";
 
@@ -74,7 +75,7 @@ export function PortfolioInsights({
   function generate() {
     setLoading(true);
     setError(false);
-    fetch("http://localhost:8000/portfolio-insights", {
+    fetch(`${API_BASE_URL}/portfolio-insights`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

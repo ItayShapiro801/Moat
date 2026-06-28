@@ -1,6 +1,7 @@
 "use client";
 
 import { use, useState, useEffect } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { Card } from "@/components/ui/Card";
 import { StatBlock } from "@/components/ui/StatBlock";
 import { Badge } from "@/components/ui/Badge";
@@ -106,7 +107,7 @@ export default function AnalyzePage({
   useEffect(() => {
     setLoading(true);
     setError(null);
-    fetch(`http://localhost:8000/analyze/${ticker}`)
+    fetch(`${API_BASE_URL}/analyze/${ticker}`)
       .then((res) => {
         if (!res.ok) throw new Error(`Failed to fetch (${res.status})`);
         return res.json();
@@ -115,7 +116,7 @@ export default function AnalyzePage({
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
 
-    fetch(`http://localhost:8000/metrics/${ticker}`)
+    fetch(`${API_BASE_URL}/metrics/${ticker}`)
       .then((r) => r.json())
       .then((m: { valuation: MetricsValuation }) =>
         setCurrentPE(m.valuation.pe_ratio)

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { motion } from "framer-motion";
 
 interface MoatScores {
@@ -105,7 +106,7 @@ export function DeepResearchButton({
     setOpen(true);
     setLoading(true);
     setError(false);
-    fetch(`http://localhost:8000/deep-research/${ticker}${refresh ? "?refresh=true" : ""}`)
+    fetch(`${API_BASE_URL}/deep-research/${ticker}${refresh ? "?refresh=true" : ""}`)
       .then((r) => {
         if (!r.ok) throw new Error();
         return r.json();

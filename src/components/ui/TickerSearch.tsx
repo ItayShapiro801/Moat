@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { useRouter } from "next/navigation";
 import { Button } from "./Button";
 
@@ -61,7 +62,7 @@ export function TickerSearch({
     }
     debounceRef.current = setTimeout(() => {
       const eq = equityOnly ? "&equity_only=true" : "";
-      fetch(`http://localhost:8000/search?q=${encodeURIComponent(value.trim())}${eq}`)
+      fetch(`${API_BASE_URL}/search?q=${encodeURIComponent(value.trim())}${eq}`)
         .then((r) => r.json())
         .then((data: SearchResult[]) => {
           setResults(data);

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { Card } from "./ui/Card";
 
 interface FundHolding {
@@ -28,7 +29,7 @@ export function InstitutionalHoldings({ ticker }: { ticker: string }) {
     if (fetchedTicker.current === ticker) return;
     fetchedTicker.current = ticker;
     setLoading(true);
-    fetch(`http://localhost:8000/institutional-holdings/${ticker}`)
+    fetch(`${API_BASE_URL}/institutional-holdings/${ticker}`)
       .then((r) => r.json())
       .then((d) => setFunds(d.funds || []))
       .catch(() => setFunds([]))

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { Card } from "./ui/Card";
 
 interface Trade {
@@ -41,7 +42,7 @@ export function InsiderTrades({ ticker }: { ticker: string }) {
     fetchedTicker.current = ticker;
     setLoading(true);
     setError(false);
-    fetch(`http://localhost:8000/insider-trades/${ticker}`)
+    fetch(`${API_BASE_URL}/insider-trades/${ticker}`)
       .then((r) => {
         if (!r.ok) throw new Error();
         return r.json();

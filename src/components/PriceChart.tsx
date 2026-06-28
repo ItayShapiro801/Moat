@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import { Card } from "./ui/Card";
 import {
   AreaChart,
@@ -36,7 +37,7 @@ export function PriceChart({ ticker }: PriceChartProps) {
     // between tickers can otherwise resolve out of order and show stale data.
     let active = true;
     setLoading(true);
-    fetch(`http://localhost:8000/price-history/${ticker}?period=${period}`)
+    fetch(`${API_BASE_URL}/price-history/${ticker}?period=${period}`)
       .then((r) => {
         if (!r.ok) throw new Error();
         return r.json();
