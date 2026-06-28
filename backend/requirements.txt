@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+yfinance
+pydantic
+python-dotenv
+groq
+google-generativeai
+resend
+cerebras-cloud-sdk
