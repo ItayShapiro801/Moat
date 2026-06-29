@@ -1,139 +1,316 @@
-<div align="center">
-
 # Moat
 
-**Value-investing research for stocks, ETFs, and crypto — intrinsic value, quality scores, and legendary-investor analysis in one place.**
+Moat is an equity-research web application. Given a ticker, it computes a blended
+intrinsic-value estimate, a Piotroski F-Score, and a set of derived metrics, then
+layers on LLM-generated narrative analysis and a personal portfolio tracker.
 
-</div>
+It is a two-tier system: a **Next.js (App Router) frontend** and a **FastAPI
+backend**, with **Supabase** (Postgres + Auth) for user data. The backend owns all
+computation and third-party integrations; the frontend is a typed client that
+renders results and manages auth/portfolio state.
 
-Moat turns a ticker into a research dossier: a blended intrinsic-value estimate (DCF + multiples), a Piotroski F-Score, simulated takes from six legendary investors, insider and institutional activity, an AI investment thesis and deep-research report, plus a personal portfolio tracker with currency-aware holdings and AI key insights.
+> **Scope note.** This README describes only what is implemented in the codebase.
+> Where a subsystem is intentionally simple (e.g. the screener runs as a batch job,
+> the cache is in-memory), that is stated rather than dressed up. See
+> [Limitations & Future Work](#limitations--future-work).
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Features](#features)
-- [Tech Stack](#tech-stack)
+- [System Design](#system-design)
 - [Architecture](#architecture)
+- [Core Components](#core-components)
+- [Engineering Highlights](#engineering-highlights)
+- [API Surface](#api-surface)
+- [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
-- [Getting Started](#getting-started)
+- [Developer Experience](#developer-experience)
 - [Configuration](#configuration)
-- [Development Workflow](#development-workflow)
 - [Scripts](#scripts)
-- [Build & Deployment](#build--deployment)
-- [Testing](#testing)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
+- [Limitations & Future Work](#limitations--future-work)
 - [Documentation](#documentation)
 
 ---
 
 ## Overview
 
-Moat is a two-tier application:
+The core idea is a **valuation pipeline**: pull a company's fundamentals from market
+data providers, run several independent valuation methods, and blend them into a
+single intrinsic-value estimate with a confidence rating. Narrative features
+(thesis, investor-persona evaluations, deep-research report, portfolio insights)
+are built on top by feeding the same computed data to an LLM under a fixed JSON
+schema.
 
-- A **Next.js (App Router) frontend** that renders the research UI and talks to Supabase for auth and the user's portfolio.
-- A **FastAPI backend** that does all the heavy lifting — fetching market data, computing valuations, and orchestrating LLM providers for narrative analysis.
+Responsibilities are split cleanly:
 
-The two communicate over a simple REST API. The frontend never holds backend API keys; all third-party provider keys live only on the backend.
+- **Frontend (`src/`)** — App Router routes, feature components, and a thin client
+  layer (`src/lib/api.ts`). It calls Supabase directly for auth and portfolio rows
+  (protected by Row-Level Security) and the FastAPI backend for everything else.
+- **Backend (`backend/`)** — thin HTTP **routers** over reusable **services**. All
+  market-data and LLM-provider keys live only here.
+- **Supabase** — Postgres tables (`portfolio_holdings`, `portfolio_insights_cache`)
+  with RLS, plus auth.
 
-## Features
+## System Design
 
-| Area | What it does |
-|------|--------------|
-| **Analyze** | Intrinsic value (blended internal DCF + external DCF + relative multiples), margin of safety, Piotroski F-Score, confidence rating. Asset-class aware: ETFs/crypto/indices skip company-only metrics. |
-| **Investors** | Six legendary investors (Buffett, Munger, Lynch, Burry, Ackman, Graham) each give a scored bull/bear verdict from the same fundamentals. |
-| **Thesis & Deep Research** | On-demand AI investment thesis and a full diligence report (business model, moat, risks, scenarios). |
-| **Screener** | Filter the S&P 500 by margin of safety and F-Score from a pre-built cache. |
-| **Compare** | Side-by-side metric and investor-verdict comparison (individual stocks only). |
-| **Portfolio** | Dollar-based holdings with currency conversion (native + USD), live gain/loss, allocation donut, and persisted AI "Key Insights". |
-| **Ownership** | Insider trades (SEC Form 4) and legendary-fund 13F holdings. |
-| **Reports** | Export a polished PDF research report or email it. |
+### Data flow
 
-## Tech Stack
+```
+Browser ──▶ Next.js (App Router, React 19)
+   │              │
+   │              ├─▶ Supabase            auth session, portfolio rows, insights cache
+   │              │   (direct, RLS)
+   │              │
+   │              └─▶ FastAPI (REST)      all research / valuation / LLM endpoints
+   │                     │                base URL from NEXT_PUBLIC_API_BASE_URL
+   │                     │
+   │                     ├─ yfinance / Financial Modeling Prep   fundamentals, prices, external DCF
+   │                     ├─ SEC EDGAR                            Form 4 insiders, 13F holdings
+   │                     ├─ LLM chain: Groq → Gemini → Cerebras  thesis, deep research, investor takes
+   │                     └─ Resend                               PDF report email (optional)
+```
 
-**Frontend** — [Next.js 16](https://nextjs.org) (App Router), [React 19](https://react.dev), [TypeScript](https://www.typescriptlang.org), [Tailwind CSS v4](https://tailwindcss.com), [Recharts](https://recharts.org), [Framer Motion](https://www.framer.com/motion/), [jsPDF](https://github.com/parallax/jsPDF) + [html2canvas-pro](https://github.com/yorickshan/html2canvas-pro), [Supabase JS](https://supabase.com/docs/reference/javascript).
+### Separation of concerns
 
-**Backend** — [FastAPI](https://fastapi.tiangolo.com), [Uvicorn](https://www.uvicorn.org), [yfinance](https://github.com/ranaroussi/yfinance), [Financial Modeling Prep](https://financialmodelingprep.com), SEC EDGAR, LLM provider chain ([Groq](https://groq.com) → [Gemini](https://ai.google.dev) → [Cerebras](https://cerebras.ai)), [Resend](https://resend.com).
+- **Routers are thin; services are reusable.** HTTP modules in `backend/routers/`
+  validate input and shape responses. The valuation math, LLM orchestration, and
+  scoring live in `backend/services/` and are imported by routers and by the
+  standalone screener script alike.
+- **Secrets never reach the browser.** The frontend holds only the Supabase anon
+  key (safe by design, gated by RLS). FMP / Groq / Gemini / Cerebras / Resend keys
+  are read exclusively in `backend/config.py`.
+- **Configurable boundaries.** The frontend's backend URL
+  (`NEXT_PUBLIC_API_BASE_URL`) and the backend's CORS allow-list
+  (`CORS_ALLOWED_ORIGINS`) are environment-driven, so the same code runs locally and
+  in production without edits.
 
-**Data & Auth** — [Supabase](https://supabase.com) (Postgres + Auth + Row-Level Security).
+### Why this stack (as reflected in the code)
+
+- **FastAPI** for the backend: the work is CPU/IO-bound Python over `pandas`/
+  `yfinance` and several SDKs (Groq, Gemini, Cerebras, Resend). Python keeps the
+  data and provider code in one language, and FastAPI gives typed request models
+  (Pydantic) and auto-generated OpenAPI docs (`/docs`) for free.
+- **Next.js (App Router)** for the frontend: file-based routing, server/client
+  components, and first-class TypeScript. Supabase auth is handled client-side via
+  `@supabase/ssr`.
 
 ## Architecture
 
 ```
-┌─────────────────┐      REST        ┌──────────────────┐
-│  Next.js (web)  │ ───────────────▶ │  FastAPI (api)   │
-│  App Router     │  localhost:8000  │  routers/        │
-│  React 19       │ ◀─────────────── │  services/       │
-└────────┬────────┘                  └────────┬─────────┘
-         │ auth + portfolio rows              │ market data + LLMs
-         ▼                                    ▼
-   ┌───────────┐               ┌───────────────────────────────┐
-   │ Supabase  │               │ yfinance · FMP · SEC EDGAR ·   │
-   │ (Postgres │               │ Groq · Gemini · Cerebras ·     │
-   │  + Auth)  │               │ Resend                         │
-   └───────────┘               └───────────────────────────────┘
+backend/
+  main.py              FastAPI app: CORS + router registration only
+  routers/             HTTP layer (one module per domain)
+    analyze.py         /analyze, /price-history, /fx-rate, /financials, /metrics
+    investors.py       /investors  (persona evaluations)
+    thesis.py          /thesis, /deep-research
+    portfolio.py       /portfolio-insights
+    screener.py        /screener   (reads a precomputed cache)
+    ownership.py       /insider-trades, /institutional-holdings  (SEC EDGAR)
+    search.py          /search
+    reports.py         /email-report
+  services/            Domain logic (no HTTP concerns)
+    dcf.py             internal 2-stage DCF + external DCF (FMP)
+    relative_value.py  multiples valuation + merger/reorg detection
+    blend.py           blend + confidence + sector/cyclical adjustments
+    piotroski.py       F-Score (9 signals)
+    llm_providers.py   provider fallback chain, response cache, per-key locks
+  config.py            env vars + constants
+  models.py            Pydantic request models
+  utils.py             shared pure helpers
+  run_screener.py      standalone batch job → screener_cache.json
+
+src/
+  app/                 App Router routes (each folder = a URL)
+  components/          feature components + ui/ primitives
+  lib/                 api.ts (backend base URL), auth-context, supabase client
 ```
 
-The backend is organized as thin **routers** (HTTP layer) over reusable **services** (valuation engine, LLM providers). See [docs/Architecture.md](docs/Architecture.md) for details.
+## Core Components
+
+### 1. Valuation engine (`backend/services/`, composed in `routers/analyze.py`)
+
+`analyze(ticker)` orchestrates four independent valuation inputs and blends them.
+
+- **Internal DCF (`dcf.py`)** — a 2-stage discounted-cash-flow model. Base free cash
+  flow is projected 5 years, plus a Gordon-growth terminal value. The discount rate
+  is a CAPM-style WACC (`0.045 + beta * 0.05`, clamped to `[0.06, 0.13]`); the growth
+  input prefers forward earnings, then forward revenue, then a 3-year FCF CAGR
+  (clamped to `[-0.15, 0.35]`); terminal growth is sector-aware (3.5% for
+  Technology / Communication Services / Healthcare, else 2.5%). It runs three
+  scenarios — **bear / base / bull** — by varying growth and WACC.
+- **External DCF (`dcf.py`)** — an independent per-share DCF pulled from Financial
+  Modeling Prep, used as a cross-check. Skipped gracefully if no API key.
+- **Relative value (`relative_value.py`)** — multiples-based valuation computed from
+  the company's **own 5-year history**: median P/E, P/S, EV/EBITDA, P/FCF, and P/B
+  multiples are derived from past years, then applied to current per-share metrics.
+- **Blend (`blend.py`)** — combines internal DCF, external DCF, and relative value
+  into one estimate with weights and a confidence rating. Adjustments are applied
+  based on company characteristics (see Engineering Highlights).
+
+The same module computes the **Piotroski F-Score** (`piotroski.py`): the standard
+9 binary signals across profitability (ROA, ROA trend, operating cash flow,
+accruals), leverage/liquidity (long-term debt ratio, current ratio, share count),
+and efficiency (gross margin, asset turnover), returning an integer 0–9.
+
+### 2. Data aggregation layer (`backend/routers/`)
+
+- **Market data** comes from `yfinance` (prices, fundamentals, balance sheet, cash
+  flow) and **Financial Modeling Prep** (external DCF). `/fx-rate` converts non-USD
+  instruments to USD for portfolio totals.
+- **Automatic FMP fallback** (`services/fmp_fallback.py`). `yfinance` is the
+  primary, always-live source, but it rate-limits. When a request to `/analyze`,
+  `/price-history`, `/financials`, or `/metrics` hits a throttle (an explicit
+  "Too Many Requests" / `429`, or the common silent symptom of empty data),
+  the endpoint automatically retries the same request against FMP's equivalents
+  (`/quote`, `/profile`, `/income-statement`, `/cash-flow-statement`, `/ratios`,
+  `/historical-price-eod`) and reshapes the result into the **same response
+  shape**. Unavailable fields return `null` rather than crashing. `/analyze`'s
+  fallback is intentionally degraded (price/name/sector/currency with a note;
+  the multi-year valuation engine is not reconstructed). Every served request
+  logs its source (`yfinance` | `fmp_fallback`).
+- **Ownership data** comes from **SEC EDGAR**: `/insider-trades` parses Form 4
+  filings; `/institutional-holdings` reads 13F holdings. Both fan out concurrently
+  with a `ThreadPoolExecutor` (see Engineering Highlights).
+- **Deep research** (`thesis.py`) is a fan-in aggregator: it calls `analyze`,
+  `metrics`, `financials`, `insider-trades`, and `institutional-holdings` internally
+  through a `safe()` best-effort wrapper (each sub-fetch is isolated; a failure
+  returns `{}` instead of failing the whole report), then passes the assembled data
+  to the LLM.
+
+### 3. Portfolio system (`src/app/portfolio/`, `backend/routers/portfolio.py`, Supabase)
+
+- Holdings are stored per user in Supabase `portfolio_holdings` (RLS-enforced), with
+  amount invested, shares, purchase price, currency, and asset type.
+- The frontend computes live value, gain/loss, and allocation; non-USD holdings are
+  converted to USD via the backend `/fx-rate` endpoint, and both native and USD
+  values are shown.
+- **Portfolio insights** (`/portfolio-insights`) sends the user's holdings to the
+  LLM for a structured assessment. Results are cached in `portfolio_insights_cache`
+  keyed by a **hash of the holdings**, so insights persist across visits and only
+  regenerate when the portfolio actually changes.
+
+### 4. LLM orchestration layer (`backend/services/llm_providers.py`)
+
+- **Provider fallback chain.** `_llm_call` tries providers in order
+  (**Groq → Gemini → Cerebras**), skipping any without a configured key, and returns
+  the first response that parses as JSON. All providers are called in JSON-mode with
+  a fixed temperature.
+- **Response cache.** Generated narrative responses are cached in-memory with a TTL
+  (12h for thesis/investors, 24h for deep research).
+- **Cache-stampede protection.** Per-cache-key locks ensure that when multiple
+  requests hit the same uncached ticker simultaneously, only the first triggers
+  generation; the rest wait and reuse the result.
+
+> **On the "investor" feature:** `/investors` evaluates a company against six
+> configurable **investor-persona system prompts** (e.g. value, growth, contrarian
+> styles). It is an LLM call constrained to a JSON schema (score + verdict +
+> rationale per persona), grounded in the computed fundamentals — not a proprietary
+> model. It is presented here as exactly that.
+
+## Engineering Highlights
+
+All of the following are present in the codebase:
+
+- **Multi-method valuation with cross-checks** — internal DCF, an independent
+  external DCF, and historical-multiples relative value are computed separately and
+  blended, rather than relying on a single number.
+- **Domain-aware blend adjustments** (`blend.py`):
+  - *Financial-sector exclusion* — DCF is dropped for financials/insurance where it
+    is unreliable.
+  - *Dynamic cyclicality detection* — independent of the sector label, a company is
+    treated as cyclical when its 5-year FCF coefficient of variation exceeds a
+    threshold (or shows a negative year amid positive years).
+  - *Merger / reorganization guard* (`relative_value.py` → `detect_reorganization`)
+    — detects large share-count jumps that would distort per-share history and flags
+    the result accordingly.
+- **Provider fallback chain** — graceful degradation across three LLM providers;
+  the system keeps working with any subset of keys configured.
+- **Market-data fallback with rate-limit detection** — when the primary source
+  (`yfinance`) throttles, the data endpoints transparently fail over to FMP and
+  reshape responses to match, with per-source logging (see Data aggregation layer).
+- **In-memory TTL cache + per-key stampede locks** — see the LLM orchestration layer
+  above. The FMP fallback path adds its own short **60-second cache** (keyed by
+  ticker), applied *only* to fallback responses, to protect FMP's limited daily
+  budget during a throttling window. The primary `yfinance` path is never cached.
+- **Concurrent API aggregation** — SEC EDGAR fan-out via `ThreadPoolExecutor`
+  (`max_workers` of 3–4) in `ownership.py`.
+- **Best-effort fan-in** — the deep-research aggregator isolates each sub-fetch with
+  a `safe()` wrapper so one failing data source doesn't fail the report.
+- **Asset-class branching** — `/analyze` inspects the instrument's `quoteType` and
+  skips company-only metrics (DCF, F-Score, personas) for ETFs, crypto, and
+  indices, returning price/metadata instead.
+- **Environment-driven boundaries** — backend URL and CORS allow-list are config,
+  not constants.
+
+## API Surface
+
+All backend endpoints (FastAPI, served with OpenAPI docs at `/docs`):
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/analyze/{ticker}` | Blended intrinsic value, F-Score, scenarios, confidence |
+| GET | `/price-history/{ticker}` | Historical prices |
+| GET | `/financials/{ticker}` | Financial statement series |
+| GET | `/metrics/{ticker}` | Derived ratios + analyst data |
+| GET | `/fx-rate` | Currency → USD rate |
+| GET | `/investors/{ticker}` | Persona-based LLM evaluations |
+| GET | `/thesis/{ticker}` | LLM investment thesis |
+| GET | `/deep-research/{ticker}` | Aggregated multi-source LLM report |
+| GET | `/screener` | Filter the precomputed S&P 500 cache |
+| GET | `/insider-trades/{ticker}` | SEC Form 4 activity |
+| GET | `/institutional-holdings/{ticker}` | 13F holdings |
+| GET | `/search` | Ticker/instrument search |
+| POST | `/portfolio-insights` | LLM assessment of a holdings set |
+| POST | `/email-report` | Email a generated PDF (optional, off by default) |
+
+## Tech Stack
+
+**Frontend** — Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS v4,
+Recharts, Framer Motion, jsPDF + html2canvas-pro, `@supabase/ssr`.
+
+**Backend** — FastAPI, Uvicorn, `yfinance`, Financial Modeling Prep, SEC EDGAR,
+LLM SDKs (Groq, Google Generative AI, Cerebras), Resend, `pandas` (via yfinance).
+
+**Data & Auth** — Supabase (Postgres + Auth + Row-Level Security).
 
 ## Project Structure
 
-```
-moat/
-├── src/                      # Next.js frontend
-│   ├── app/                  # App Router routes (each folder = a URL)
-│   ├── components/           # Feature components + ui/ primitives
-│   └── lib/                  # Cross-cutting: api config, auth, Supabase client
-├── backend/                  # FastAPI service
-│   ├── routers/              # HTTP endpoints (one module per domain)
-│   ├── services/             # Valuation engine + LLM providers
-│   ├── config.py             # Env + constants
-│   ├── models.py             # Pydantic request models
-│   └── utils.py              # Shared helpers
-├── docs/                     # Architecture, development, configuration guides
-└── public/                   # Static assets
-```
+See [docs/FolderStructure.md](docs/FolderStructure.md) for the full annotated tree.
+Top level: `src/` (frontend), `backend/` (API), `docs/` (guides), `public/` (assets).
 
-Full annotated tree: [docs/FolderStructure.md](docs/FolderStructure.md).
-
-## Getting Started
+## Developer Experience
 
 ### Prerequisites
 
-- **Node.js** >= 18 and npm
-- **Python** 3.9+
-- A **Supabase** project (free tier is fine)
-- API keys for the backend providers (see [Configuration](#configuration)) — optional, but AI/valuation features degrade without them
+- Node.js ≥ 18 and npm
+- Python 3.9+
+- A Supabase project (free tier is fine)
+- Provider API keys are optional individually; AI/valuation features degrade
+  gracefully without them.
 
-### 1. Clone & install
+### Setup
 
 ```bash
-git clone <repo-url> moat
-cd moat
+git clone <repo-url> moat && cd moat
 
-# Frontend deps
+# Frontend
 npm install
 
-# Backend deps
+# Backend
 pip install -r backend/requirements.txt
+
+# Environment
+cp .env.example .env.local            # frontend
+cp backend/.env.example backend/.env  # backend
 ```
 
-### 2. Configure environment
+Apply the database schema (SQL in
+[docs/Configuration.md](docs/Configuration.md#database-schema)) in the Supabase SQL
+editor to create `portfolio_holdings` and `portfolio_insights_cache` with RLS.
 
-```bash
-cp .env.example .env.local           # frontend (Supabase + API base URL)
-cp backend/.env.example backend/.env # backend (provider keys)
-```
-
-Fill in the values — see [Configuration](#configuration).
-
-### 3. Set up the database
-
-Run the SQL in [docs/Configuration.md](docs/Configuration.md#database-schema) in the Supabase SQL editor to create the `portfolio_holdings` and `portfolio_insights_cache` tables with Row-Level Security.
-
-### 4. Run both servers
+### Run
 
 ```bash
 # Terminal 1 — backend
@@ -143,67 +320,75 @@ cd backend && uvicorn main:app --reload --port 8000
 npm run dev
 ```
 
-Open http://localhost:3000. The backend API docs are at http://localhost:8000/docs.
+App: http://localhost:3000 — API docs: http://localhost:8000/docs
+
+### How frontend and backend communicate
+
+- The frontend resolves the backend base URL from `NEXT_PUBLIC_API_BASE_URL`
+  (defaults to `http://localhost:8000`). All calls go through `src/lib/api.ts` — no
+  hardcoded URLs.
+- The backend's CORS allow-list comes from `CORS_ALLOWED_ORIGINS` (defaults to
+  `http://localhost:3000`). In production, set both to the deployed URLs.
+- The frontend talks to Supabase directly for auth and portfolio reads/writes; RLS
+  ensures a user can only see their own rows.
 
 ## Configuration
 
-All configuration is via environment variables. Templates are committed as `.env.example`; real values are never committed.
+Environment variables (templates committed as `.env.example`; real values never
+committed):
 
 | Variable | Side | Purpose |
 |----------|------|---------|
 | `NEXT_PUBLIC_SUPABASE_URL` | frontend | Supabase project URL |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | frontend | Supabase anon key (browser-safe, RLS-protected) |
-| `NEXT_PUBLIC_API_BASE_URL` | frontend | Backend base URL (defaults to `http://localhost:8000`) |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | frontend | Supabase anon key (RLS-protected) |
+| `NEXT_PUBLIC_API_BASE_URL` | frontend | Backend base URL (default `http://localhost:8000`) |
+| `NEXT_PUBLIC_ENABLE_EMAIL` | frontend | Show the "Email PDF" button (default off) |
 | `FMP_API_KEY` | backend | Financial Modeling Prep (external DCF) |
-| `GROQ_API_KEY` / `GEMINI_API_KEY` / `CEREBRAS_API_KEY` | backend | LLM provider fallback chain |
-| `RESEND_API_KEY` | backend | Transactional email for PDF reports |
+| `GROQ_API_KEY` / `GEMINI_API_KEY` / `CEREBRAS_API_KEY` | backend | LLM fallback chain |
+| `RESEND_API_KEY` | backend | Email delivery (optional) |
+| `CORS_ALLOWED_ORIGINS` | backend | Comma-separated allowed origins |
 
-See [docs/Configuration.md](docs/Configuration.md) for the database schema and per-variable detail.
-
-## Development Workflow
-
-- Frontend dev server with hot reload: `npm run dev`
-- Backend with auto-reload: `uvicorn main:app --reload --port 8000`
-- Type-check: `npx tsc --noEmit`
-- Lint: `npm run lint`
-- Rebuild the screener cache (manual, occasional): `python backend/run_screener.py`
-
-More in [docs/Development.md](docs/Development.md).
+Details and the database schema: [docs/Configuration.md](docs/Configuration.md).
 
 ## Scripts
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Start the Next.js dev server |
+| `npm run dev` | Next.js dev server |
 | `npm run build` | Production build |
 | `npm run start` | Serve the production build |
-| `npm run lint` | Run ESLint |
+| `npm run lint` | ESLint |
+| `python backend/run_screener.py` | Rebuild the screener cache (batch job) |
 
-## Build & Deployment
+## Limitations & Future Work
 
-```bash
-npm run build   # frontend production build
-npm run start   # serve it
-```
+Stated honestly so the boundaries are clear:
 
-The frontend deploys cleanly to Vercel. The backend is a standard ASGI app — run it with `uvicorn main:app` behind any ASGI host. Set `NEXT_PUBLIC_API_BASE_URL` to the deployed backend URL. See [docs/Development.md](docs/Development.md).
+- **No automated test suite.** Playwright is available and has been used for manual
+  browser smoke checks of critical flows, but there are no committed unit or
+  integration tests, and no CI pipeline.
+- **Single-instance assumptions.** The LLM response cache and per-key stampede locks
+  are **in-process**. Running multiple backend instances behind a load balancer
+  would give each its own cache and locks — a shared store (e.g. Redis) would be
+  required to scale horizontally. Not currently implemented.
+- **No observability.** There is no structured logging, metrics, or tracing beyond
+  stdout. No rate-limiting or auth on the backend API itself (it is a read-mostly
+  data API; user data is protected at the Supabase/RLS layer, not the FastAPI layer).
+- **Screener is a batch job.** `/screener` serves a precomputed `screener_cache.json`
+  built by manually running `run_screener.py`; there is no scheduler.
+- **Type/lint debt.** A small set of pre-existing TypeScript strictness warnings
+  (mainly Recharts generic mismatches and Supabase callback `any`s) are currently
+  not enforced at build time (`next.config.ts` → `ignoreBuildErrors`). Behavior is
+  unaffected; resolving them is tracked work.
+- **External-API dependence.** Data quality and availability depend on yfinance, FMP,
+  SEC EDGAR, and the LLM providers, including their free-tier rate limits. The
+  yfinance→FMP fallback, LLM provider chain, and best-effort aggregation mitigate
+  but do not eliminate this — and the FMP fallback cache is also in-process, so it
+  shares the single-instance limitation noted above. FMP itself has a limited daily
+  free-tier quota, which the 60-second fallback cache is designed to protect.
 
-## Testing
-
-The repo includes [Playwright](https://playwright.dev) for browser-driven smoke checks of critical flows (analyze pages, compare, portfolio). There is no formal unit-test suite yet — see [Future Improvements](docs/Development.md#future-improvements).
-
-## Troubleshooting
-
-| Symptom | Likely cause / fix |
-|---------|--------------------|
-| Frontend calls fail / CORS errors | Backend not running on `:8000`, or `NEXT_PUBLIC_API_BASE_URL` misconfigured |
-| Portfolio is empty after login | Database migrations not applied — see [Configuration](#configuration) |
-| AI features return errors | Missing/invalid provider keys, or free-tier rate limits (the chain falls back across providers) |
-| Screener shows "cache not built" | Run `python backend/run_screener.py` |
-
-## Contributing
-
-See [docs/Contributing.md](docs/Contributing.md) for conventions, branch/commit style, and the PR checklist.
+Planned and tracked improvements are detailed in
+[docs/Development.md](docs/Development.md#future-improvements).
 
 ## Documentation
 

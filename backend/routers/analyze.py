@@ -19,20 +19,40 @@ from services.piotroski import compute_piotroski
 from services.dcf import compute_internal_dcf, fetch_external_dcf
 from services.relative_value import detect_reorganization, compute_relative_value
 from services.blend import compute_blended_valuation
+from services.fmp_fallback import (
+    is_rate_limited, log_source,
+    analyze_fallback, price_history_fallback, financials_fallback, metrics_fallback,
+)
 
 router = APIRouter()
 
 @router.get("/analyze/{ticker}")
 def analyze(ticker: str):
     ticker = ticker.upper()
+    rate_limited = False
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
     except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Could not fetch data for {ticker}: {e}")
+        if is_rate_limited(e):
+            rate_limited = True
+            info = None
+        else:
+            raise HTTPException(status_code=404, detail=f"Could not fetch data for {ticker}: {e}")
 
+    # Empty info with no price is yfinance's common *silent* rate-limit symptom
+    # (it returns {} rather than raising). Treat both that and an explicit 429 as
+    # a trigger to try the FMP fallback before giving up.
     if not info or (info.get("regularMarketPrice") is None and info.get("currentPrice") is None):
+        fb = analyze_fallback(ticker)
+        if fb is not None:
+            log_source("analyze", ticker, "fmp_fallback")
+            return fb
+        if rate_limited:
+            raise HTTPException(status_code=503, detail=f"Data temporarily unavailable for {ticker} (rate-limited).")
         raise HTTPException(status_code=404, detail=f"No data found for ticker {ticker}")
+
+    log_source("analyze", ticker, "yfinance")
 
     current_price = safe_get(info, "currentPrice") or safe_get(info, "regularMarketPrice", 0)
     company_name = safe_get(info, "longName") or safe_get(info, "shortName", ticker)
@@ -211,9 +231,18 @@ def price_history(ticker: str, period: str = "1y"):
     if period not in VALID_PERIODS:
         period = "1y"
     stock = yf.Ticker(ticker)
-    hist = stock.history(period=period)
-    if hist.empty:
+    try:
+        hist = stock.history(period=period)
+    except Exception:
+        hist = None  # rate-limit or transient error -> try fallback below
+
+    if hist is None or hist.empty:
+        fb = price_history_fallback(ticker, period)
+        if fb is not None:
+            log_source("price-history", ticker, "fmp_fallback")
+            return fb
         raise HTTPException(status_code=404, detail=f"No price history for {ticker}")
+    log_source("price-history", ticker, "yfinance")
     # yfinance can return NaN/Inf closes for some dates (gaps, partial data).
     # Skip them — NaN/Inf are not JSON-serializable and 500 the whole response.
     dates = []
@@ -280,9 +309,26 @@ def fx_rate(base: str = "USD"):
 def financials_endpoint(ticker: str):
     ticker = ticker.upper()
     stock = yf.Ticker(ticker)
-    inc = stock.financials
-    cf = stock.cashflow
-    bs = stock.balance_sheet
+    try:
+        inc = stock.financials
+        cf = stock.cashflow
+        bs = stock.balance_sheet
+    except Exception:
+        inc = cf = bs = None
+
+    # Empty income statement is the rate-limit symptom; try FMP before degrading.
+    if inc is None or getattr(inc, "empty", True):
+        fb = financials_fallback(ticker)
+        if fb is not None:
+            log_source("financials", ticker, "fmp_fallback")
+            return fb
+        # No fallback data: fall through with empty frames -> empty arrays (prior behavior).
+        import pandas as pd
+        inc = inc if inc is not None else pd.DataFrame()
+        cf = cf if cf is not None else pd.DataFrame()
+        bs = bs if bs is not None else pd.DataFrame()
+    else:
+        log_source("financials", ticker, "yfinance")
 
     revenue = extract_series(inc, "Total Revenue")
     gross_profit = extract_series(inc, "Gross Profit")
@@ -345,7 +391,20 @@ def financials_endpoint(ticker: str):
 def metrics_endpoint(ticker: str):
     ticker = ticker.upper()
     stock = yf.Ticker(ticker)
-    info = stock.info or {}
+    try:
+        info = stock.info or {}
+    except Exception:
+        info = {}
+
+    # Empty info (no market cap / price) is the rate-limit symptom; try FMP first.
+    if not info or (info.get("marketCap") is None and info.get("currentPrice") is None
+                    and info.get("regularMarketPrice") is None):
+        fb = metrics_fallback(ticker)
+        if fb is not None:
+            log_source("metrics", ticker, "fmp_fallback")
+            return fb
+    else:
+        log_source("metrics", ticker, "yfinance")
 
     def g(key, default=None):
         return safe_get(info, key, default)
