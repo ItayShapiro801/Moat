@@ -438,9 +438,13 @@ export default function AnalyzePage({
           <PEChart ticker={data.ticker} currentPE={currentPE} />
 
           {/* Key Metrics */}
+          {/* `fair_value` was never part of the analyze response, so this prop has
+              always resolved to undefined (the fair-value gap renders as N/A).
+              Pass null explicitly to preserve that exact behavior and unblock the
+              production type-check. See docs/Development.md (future improvements). */}
           <KeyMetrics
             ticker={data.ticker}
-            fairValue={data.fair_value}
+            fairValue={null}
             currentPrice={data.current_price}
           />
         </>

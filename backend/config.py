@@ -8,6 +8,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
 
+# Comma-separated list of browser origins allowed by CORS. Defaults to the local
+# dev frontend; in production set CORS_ALLOWED_ORIGINS to the deployed site URL(s).
+CORS_ORIGINS = [
+    o.strip()
+    for o in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if o.strip()
+]
+
 FINANCIAL_SECTORS = {"Financial Services", "Insurance"}
 
 

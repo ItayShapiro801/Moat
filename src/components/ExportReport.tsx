@@ -8,6 +8,11 @@ import { jsPDF } from "jspdf";
 import html2canvas from "html2canvas-pro";
 import { useAuth } from "@/lib/auth-context";
 
+// Email delivery requires a verified sending domain (Resend), which the public
+// free deployment doesn't have. Hidden unless explicitly enabled; "Download PDF"
+// works for everyone regardless. Set NEXT_PUBLIC_ENABLE_EMAIL=true to re-enable.
+const EMAIL_ENABLED = process.env.NEXT_PUBLIC_ENABLE_EMAIL === "true";
+
 interface Scenario {
   value: number | null;
 }
@@ -443,30 +448,31 @@ export function ExportReport({
                 Download PDF
               </button>
 
-              {!emailMode ? (
-                <button
-                  onClick={() => setEmailMode(true)}
-                  className="w-full py-2 rounded-md border border-moat-border text-moat-text text-sm font-medium hover:bg-moat-surface-hover transition-colors"
-                >
-                  Email PDF
-                </button>
-              ) : (
-                <div className="flex flex-col gap-2">
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="Email address"
-                    className="rounded-md border border-moat-border bg-moat-bg px-3 py-1.5 text-moat-text placeholder:text-moat-text-muted text-sm focus:outline-none focus:ring-2 focus:ring-moat-accent"
-                  />
+              {EMAIL_ENABLED &&
+                (!emailMode ? (
                   <button
-                    onClick={handleEmail}
-                    className="w-full py-2 rounded-md bg-moat-accent text-moat-bg text-sm font-medium hover:bg-moat-accent/90 transition-colors"
+                    onClick={() => setEmailMode(true)}
+                    className="w-full py-2 rounded-md border border-moat-border text-moat-text text-sm font-medium hover:bg-moat-surface-hover transition-colors"
                   >
-                    Send
+                    Email PDF
                   </button>
-                </div>
-              )}
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    <input
+                      type="email"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="Email address"
+                      className="rounded-md border border-moat-border bg-moat-bg px-3 py-1.5 text-moat-text placeholder:text-moat-text-muted text-sm focus:outline-none focus:ring-2 focus:ring-moat-accent"
+                    />
+                    <button
+                      onClick={handleEmail}
+                      className="w-full py-2 rounded-md bg-moat-accent text-moat-bg text-sm font-medium hover:bg-moat-accent/90 transition-colors"
+                    >
+                      Send
+                    </button>
+                  </div>
+                ))}
 
               {msg && (
                 <p
