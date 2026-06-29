@@ -41,6 +41,9 @@ interface AnalysisData {
   quote_type: string;
   currency: string;
   etf_info?: EtfInfo | null;
+  // Present only when the backend served degraded data via the FMP fallback
+  // (yfinance rate-limited). In that mode valuation fields are legitimately null.
+  data_source?: string | null;
   intrinsic_value: {
     bear: Scenario;
     base: Scenario;
@@ -49,6 +52,9 @@ interface AnalysisData {
     partial: boolean;
   };
   margin_of_safety_pct: number | null;
+  // confidence and f_score are null in fallback mode, but they are only ever
+  // read in the full-data (valuation_breakdown present) branch, so they are
+  // typed non-null to reflect that invariant and satisfy downstream consumers.
   confidence: "high" | "medium" | "low";
   valuation_note: string | null;
   f_score: number;
@@ -101,19 +107,32 @@ export default function AnalyzePage({
   const { ticker } = use(params);
   const [data, setData] = useState<AnalysisData | null>(null);
   const [currentPE, setCurrentPE] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // null = no error. 404 = genuinely not found. Any other status / network
+  // failure = a transient problem (e.g. data provider rate-limited), which is
+  // NOT the same as "not found".
+  const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setLoading(true);
-    setError(null);
+    setErrorStatus(null);
+    setData(null);
     fetch(`${API_BASE_URL}/analyze/${ticker}`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`Failed to fetch (${res.status})`);
+      .then(async (res) => {
+        if (!res.ok) {
+          // A 200 (including degraded fmp_fallback data) is success; only a
+          // non-2xx is an error. Remember the status to tailor the message.
+          const status = res.status;
+          setErrorStatus(status);
+          throw new Error(`HTTP ${status}`);
+        }
         return res.json();
       })
       .then(setData)
-      .catch((e) => setError(e.message))
+      .catch(() => {
+        // Network/parse failures have no HTTP status; treat as transient (-1).
+        setErrorStatus((s) => (s == null ? -1 : s));
+      })
       .finally(() => setLoading(false));
 
     fetch(`${API_BASE_URL}/metrics/${ticker}`)
@@ -126,6 +145,9 @@ export default function AnalyzePage({
 
   const baseValue = data?.intrinsic_value.base.value ?? null;
   const hasFV = baseValue != null;
+  // Degraded mode: backend served a valid quote via FMP because yfinance was
+  // rate-limited. Valuation/F-Score/investor sections are intentionally absent.
+  const isFallback = data?.data_source === "fmp_fallback";
 
   return (
     <div className="flex flex-col gap-6 px-4 py-8 mx-auto w-full max-w-5xl">
@@ -141,7 +163,8 @@ export default function AnalyzePage({
         </div>
       )}
 
-      {error && (
+      {/* "Couldn't find" ONLY for a genuine 404. */}
+      {!loading && errorStatus === 404 && (
         <Card>
           <div className="flex flex-col items-center gap-3 py-4">
             <p className="text-moat-danger text-lg font-medium">
@@ -162,6 +185,40 @@ export default function AnalyzePage({
         </Card>
       )}
 
+      {/* Any other failure (rate-limit with no fallback data, network, 5xx) is
+          transient — not "not found". */}
+      {!loading && errorStatus != null && errorStatus !== 404 && (
+        <Card>
+          <div className="flex flex-col items-center gap-3 py-4">
+            <p className="text-moat-warning text-lg font-medium">
+              {ticker.toUpperCase()} is temporarily unavailable
+            </p>
+            <p className="text-moat-text-muted text-sm text-center max-w-md">
+              The market-data provider is rate-limited right now. Please try again in
+              a moment.
+            </p>
+            <button
+              onClick={() => window.location.reload()}
+              className="mt-1 px-4 py-2 rounded-lg bg-moat-accent text-moat-bg text-sm font-medium hover:bg-moat-accent/90 transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        </Card>
+      )}
+
+      {/* Calm "limited data" banner for degraded (FMP fallback) responses. */}
+      {!loading && data && isFallback && (
+        <div className="rounded-lg border border-moat-warning/40 bg-moat-warning/10 px-4 py-3">
+          <p className="text-sm text-moat-warning">
+            <span className="font-medium">Limited data mode</span>
+            {" — "}
+            {data.valuation_note ||
+              "some valuation features are temporarily unavailable."}
+          </p>
+        </div>
+      )}
+
       {/* Non-operating assets (ETF / crypto / index): price + chart only.
           Intrinsic value, F-Score and investor analysis do not apply. */}
       {data && !loading && !data.valuation_breakdown && (
@@ -169,15 +226,19 @@ export default function AnalyzePage({
           <div className="flex items-center gap-3 flex-wrap">
             <h1 className="text-3xl font-bold text-moat-text">{data.company_name}</h1>
             <Badge variant="neutral">{data.ticker}</Badge>
-            <Badge variant="warning">
-              {data.quote_type === "CRYPTOCURRENCY"
-                ? "Crypto"
-                : data.quote_type === "ETF"
-                ? "ETF"
-                : data.quote_type === "INDEX"
-                ? "Index"
-                : data.quote_type}
-            </Badge>
+            {/* Asset-class badge applies to genuine ETF/crypto/index, not to an
+                equity that merely fell back to degraded data. */}
+            {!isFallback && (
+              <Badge variant="warning">
+                {data.quote_type === "CRYPTOCURRENCY"
+                  ? "Crypto"
+                  : data.quote_type === "ETF"
+                  ? "ETF"
+                  : data.quote_type === "INDEX"
+                  ? "Index"
+                  : data.quote_type}
+              </Badge>
+            )}
             <div className="ml-auto">
               <PortfolioButton ticker={data.ticker} />
             </div>
@@ -210,7 +271,8 @@ export default function AnalyzePage({
             )}
           </div>
 
-          {data.valuation_note && (
+          {/* In fallback mode the note is already shown in the banner above. */}
+          {data.valuation_note && !isFallback && (
             <Card>
               <p className="text-sm text-moat-text-muted">{data.valuation_note}</p>
             </Card>
@@ -298,7 +360,7 @@ export default function AnalyzePage({
                 Intrinsic Value
               </span>
               <span
-                className={`text-5xl font-semibold font-mono ${confidenceColor[data.confidence]}`}
+                className={`text-5xl font-semibold font-mono ${confidenceColor[data.confidence ?? "low"]}`}
               >
                 {data.intrinsic_value.consensus != null
                   ? `$${data.intrinsic_value.consensus.toFixed(2)}`
@@ -370,7 +432,7 @@ export default function AnalyzePage({
               </div>
               <div className="flex flex-col gap-1">
                 <span className="text-xs text-moat-text-muted">Intrinsic Value</span>
-                <span className={`text-lg font-mono font-semibold ${confidenceColor[data.confidence]}`}>
+                <span className={`text-lg font-mono font-semibold ${confidenceColor[data.confidence ?? "low"]}`}>
                   {data.intrinsic_value.consensus != null
                     ? `$${data.intrinsic_value.consensus.toFixed(2)}`
                     : "N/A"}
