@@ -161,13 +161,18 @@ def analyze(ticker: str):
     # Merger/reorg detection — corrupts multi-year per-share history.
     reorganized, reorg_reasons = detect_reorganization(stock, info)
 
-    # 3. Relative Value
-    rel_val, rel_factors = compute_relative_value(stock, info, current_price, reorganized=reorganized)
+    # 3. Relative Value. `rel_unreliable` is True when the multi-year multiples
+    # had to be discarded for forward/current anchoring (detected merger OR a
+    # result wildly out of line with price) — a single, uniform low-confidence path.
+    rel_val, rel_factors, rel_unreliable = compute_relative_value(
+        stock, info, current_price, reorganized=reorganized
+    )
+    valuation_unreliable = reorganized or rel_unreliable
 
     # 4-7. Blend (still used for adjustments + source mismatch detection)
     blend = compute_blended_valuation(
         dcf_result, ext_dcf, rel_val,
-        sector, current_price, fcf_5yr, info, stock, reorganized=reorganized
+        sector, current_price, fcf_5yr, info, stock, low_confidence_valuation=valuation_unreliable
     )
 
     scenarios = dcf_result["scenarios"]
@@ -214,6 +219,12 @@ def analyze(ticker: str):
         valuation_note = (
             "Recently merged/reorganized — multi-year history mixes pre- and "
             "post-merger figures, so the multi-year valuation is unreliable. This "
+            "estimate is forward-anchored and low-confidence."
+        )
+    elif rel_unreliable:
+        valuation_note = (
+            "Multi-year valuation multiples look unreliable for this company "
+            "(e.g. a restructuring or distorted historical figures), so this "
             "estimate is forward-anchored and low-confidence."
         )
 

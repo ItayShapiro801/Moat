@@ -160,7 +160,7 @@ const FEATURES_LIVE = [
   },
   {
     title: "PDF Report Export",
-    desc: "Generate a polished research report with thesis, charts and investor takes — download or email it.",
+    desc: "Generate a polished research report with thesis, charts and investor takes — download it as a PDF.",
     icon: "📄",
   },
   {

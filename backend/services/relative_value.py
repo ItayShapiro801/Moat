@@ -15,47 +15,89 @@ from pydantic import BaseModel
 
 from utils import *
 
-def detect_reorganization(stock, info):
-    """Detect a recent merger/reorg that corrupts multi-year per-share history.
+# Clean forward-split ratios to recognise (a split is NOT a reorganization).
+_SPLIT_RATIOS = (2, 3, 4, 5, 6, 7, 8, 10, 15, 20)
+_SPLIT_TOL = 0.12  # a jump within 12% of a clean ratio counts as that split
 
-    Two signatures: (a) a large share-count jump (>40%) between consecutive
-    periods — the classic stock-for-stock merger tell — checked on BOTH annual
-    and quarterly data (a 2026 merger may not be in the annual statements yet);
-    (b) an extreme earnings/revenue discontinuity (a sign flip or a >3x swing)
-    between consecutive fiscal years, which means pre- and post-merger entity
-    numbers are mixed in the same series. Returns (bool, [reasons])."""
-    reasons = []
 
-    def _shares_jump(series):
-        if not series or len(series) < 2:
-            return False
-        for i in range(len(series) - 1):
-            a, b = series[i], series[i + 1]
-            if a and b and min(a, b) > 0 and abs(a - b) / min(a, b) > 0.40:
-                return True
-        return False
-
-    try:
-        annual = None
-        bs = stock.balance_sheet
-        for lbl in ["Share Issued", "Common Stock Shares Outstanding", "Ordinary Shares Number"]:
-            if lbl in bs.index:
-                annual = [float(v) for v in bs.loc[lbl].dropna().values[:5]]
+def _normalize_splits(series):
+    """Back-adjust clean-ratio stock splits in a newest-first share-count series
+    so every period is on the current share basis. A forward N:1 split shows up,
+    going newest -> oldest, as the newer count being ~N x the older count; we
+    scale the older periods up by N. Returns (adjusted_newest_first, did_split).
+    Real share changes (mergers, issuance) are NOT clean ratios and pass through
+    untouched so the merger guard can still see them."""
+    if not series or len(series) < 2:
+        return list(series or []), False
+    adj = [float(v) for v in series]
+    did_split = False
+    for i in range(len(adj) - 1):
+        newer, older = adj[i], adj[i + 1]
+        if not newer or not older or newer <= 0 or older <= 0:
+            continue
+        ratio = newer / older  # >1 for a forward split going newer->older
+        for r in _SPLIT_RATIOS:
+            if abs(ratio - r) / r < _SPLIT_TOL:
+                for j in range(i + 1, len(adj)):
+                    adj[j] *= r
+                did_split = True
                 break
+    return adj, did_split
+
+
+def _largest_jump(series):
+    """Largest consecutive relative change in a series, or 0 if <2 points."""
+    if not series or len(series) < 2:
+        return 0.0
+    worst = 0.0
+    for i in range(len(series) - 1):
+        a, b = series[i], series[i + 1]
+        if a and b and min(a, b) > 0:
+            worst = max(worst, abs(a - b) / min(a, b))
+    return worst
+
+
+def _share_series(bs):
+    for lbl in ["Share Issued", "Common Stock Shares Outstanding", "Ordinary Shares Number"]:
+        if lbl in bs.index:
+            return [float(v) for v in bs.loc[lbl].dropna().values[:6]]
+    return None
+
+
+def detect_reorganization(stock, info):
+    """Detect a recent merger/reorganization that genuinely corrupts multi-year
+    per-share history — distinct from a stock split or ordinary earnings volatility.
+
+    A real reorganization (e.g. a stock-for-stock merger) shows BOTH signatures
+    together: a large share-count jump that is NOT explained by a clean split
+    ratio, AND an earnings/revenue discontinuity (sign flip or >3x swing) in the
+    same window. Requiring both avoids two false positives:
+      - a stable conglomerate (e.g. Berkshire) whose GAAP mark-to-market earnings
+        swing wildly but whose share count is stable — earnings volatility alone
+        is NOT a reorganization;
+      - a stock split (e.g. NVDA 10:1) — a clean-ratio share jump with no earnings
+        discontinuity — which is normalized elsewhere, not flagged.
+    Returns (bool reorganized, [reasons])."""
+    reasons = []
+    share_jump = False
+    try:
+        annual = _share_series(stock.balance_sheet)
         quarterly = None
         try:
-            qbs = stock.quarterly_balance_sheet
-            for lbl in ["Share Issued", "Common Stock Shares Outstanding", "Ordinary Shares Number"]:
-                if lbl in qbs.index:
-                    quarterly = [float(v) for v in qbs.loc[lbl].dropna().values[:6]]
-                    break
+            quarterly = _share_series(stock.quarterly_balance_sheet)
         except Exception:
             pass
-        if _shares_jump(annual) or _shares_jump(quarterly):
-            reasons.append("share_count_jump_>40%")
+        for series in (annual, quarterly):
+            if not series:
+                continue
+            adjusted, _ = _normalize_splits(series)  # remove split artifacts first
+            if _largest_jump(adjusted) > 0.40:        # residual = real share change
+                share_jump = True
+                break
     except Exception:
         pass
 
+    earnings_discontinuity = False
     try:
         fin = stock.financials
         for label in ["Net Income", "Total Revenue"]:
@@ -64,17 +106,23 @@ def detect_reorganization(stock, info):
                 newer, older = vals[i], vals[i + 1]
                 if older is None or newer is None or older == 0:
                     continue
-                # Sign flip (e.g. profit -> loss) with material magnitude.
                 if (newer < 0) != (older < 0) and (abs(newer) > 1e8 or abs(older) > 1e8):
+                    earnings_discontinuity = True
                     reasons.append(f"{label.lower().replace(' ', '_')}_sign_flip")
                     break
                 if abs(older) > 0 and abs(newer / older) > 3.0:
+                    earnings_discontinuity = True
                     reasons.append(f"{label.lower().replace(' ', '_')}_>3x_discontinuity")
                     break
     except Exception:
         pass
 
-    return (len(reasons) > 0, sorted(set(reasons)))
+    # A genuine reorganization requires BOTH a real (non-split) share jump AND an
+    # earnings discontinuity. Either alone is a conglomerate or a split, not a merger.
+    reorganized = share_jump and earnings_discontinuity
+    if reorganized:
+        reasons.append("share_count_jump_>40%")
+    return (reorganized, sorted(set(reasons)) if reorganized else [])
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +136,7 @@ def compute_relative_value(stock, info, current_price, reorganized=False):
     balance_sheet = stock.balance_sheet
     shares = safe_get(info, "sharesOutstanding", 0)
     if not shares or shares <= 0:
-        return None, {}
+        return None, {}, False
 
     # Gather annual per-share metrics
     ni_vals = _series_vals(financials, "Net Income", 5)
@@ -108,13 +156,17 @@ def compute_relative_value(stock, info, current_price, reorganized=False):
             equity_vals = [float(v) for v in balance_sheet.loc[lbl].dropna().values[:5]]
             break
 
-    # Get share counts per year for per-share calc
+    # Get share counts per year for per-share calc. Back-adjust clean-ratio stock
+    # splits so the multi-year per-share history is on a single, consistent basis
+    # (e.g. NVDA's 10:1 split would otherwise make older years' per-share metrics
+    # 10x too large). Real (non-split) share changes pass through unadjusted.
     sh_series = None
     for lbl in ["Share Issued", "Common Stock Shares Outstanding", "Ordinary Shares Number"]:
         if lbl in balance_sheet.index:
             sh_series = balance_sheet.loc[lbl].dropna()
             break
-    sh_vals = [float(v) for v in sh_series.values[:5]] if sh_series is not None else [shares] * 5
+    raw_sh = [float(v) for v in sh_series.values[:5]] if sh_series is not None else [shares] * 5
+    sh_vals, _ = _normalize_splits(raw_sh)
 
     # Get historical year-end prices
     try:
@@ -225,13 +277,27 @@ def compute_relative_value(stock, info, current_price, reorganized=False):
         if med_pe and eps_ttm and eps_ttm > 0:
             factors["pe"] = {"median": round(med_pe, 1), "implied": round(med_pe * eps_ttm, 2), "weight": 0.10}
 
-    # --- Merger / reorganization handling ---
-    # Multi-year historical multiples (esp. P/FCF) are corrupted when pre- and
-    # post-merger numbers mix in the same series, producing absurd implied values.
-    # For a reorganized entity, ignore the historical-median multiples and anchor
-    # on FORWARD/CURRENT data only: forward P/E on forward EPS, plus current P/S
-    # and P/B (capped to sane multiples). This trades precision for not lying.
-    if reorganized and not is_conglomerate:
+    # --- Unreliable multi-year multiples -> forward/current anchoring ---
+    # One consistent rule for every situation where the historical-median
+    # multiples can't be trusted:
+    #   * a detected merger/reorganization (pre- and post-merger numbers mixed), OR
+    #   * a result wildly divorced from the market price (>5x or <0.2x), which is
+    #     the tell-tale of corrupted history regardless of cause (restructuring,
+    #     a near-zero denominator year, etc.).
+    # In those cases, ignore the historical medians and anchor on FORWARD/CURRENT
+    # data: forward P/E on forward EPS, plus current P/S and P/B (sane multiples).
+    # This trades precision for not lying. Conglomerates keep their P/B anchor.
+    prelim = None
+    if factors and not is_conglomerate:
+        _w = sum(f["weight"] for f in factors.values())
+        prelim = sum(f["implied"] * f["weight"] for f in factors.values()) / _w if _w else None
+    out_of_range = bool(
+        prelim is not None and current_price and current_price > 0
+        and (prelim > current_price * 5 or prelim < current_price * 0.2)
+    )
+    unreliable = (reorganized or out_of_range) and not is_conglomerate
+
+    if unreliable:
         fwd_eps = safe_get(info, "forwardEps")
         factors = {}
         fwd_pe = med_pe if (med_pe and 0 < med_pe < 40) else 18.0
@@ -244,7 +310,7 @@ def compute_relative_value(stock, info, current_price, reorganized=False):
             factors["pb"] = {"median": round(pb_mult, 1), "implied": round(pb_mult * book_value_ps, 2), "weight": 0.25}
 
     if not factors:
-        return None, {}
+        return None, {}, unreliable
 
     # Redistribute weights proportionally if any factors missing
     total_w = sum(f["weight"] for f in factors.values())
@@ -253,7 +319,10 @@ def compute_relative_value(stock, info, current_price, reorganized=False):
             f["weight"] = f["weight"] / total_w
 
     relative_val = sum(f["implied"] * f["weight"] for f in factors.values())
-    return round(relative_val, 2), factors
+    # Final clamp: never report a relative value wildly outside the market price.
+    if current_price and current_price > 0:
+        relative_val = max(min(relative_val, current_price * 5), current_price * 0.2)
+    return round(relative_val, 2), factors, unreliable
 
 
 # ---------------------------------------------------------------------------

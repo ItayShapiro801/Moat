@@ -39,11 +39,14 @@ def detect_cyclical(fcf_5yr):
 
 def compute_blended_valuation(
     internal_dcf_result, external_dcf_val, relative_val,
-    sector, current_price, fcf_5yr, info, stock, reorganized=False
+    sector, current_price, fcf_5yr, info, stock, low_confidence_valuation=False
 ):
+    # `low_confidence_valuation` is set when the multi-year multiples were deemed
+    # unreliable (a detected merger, or a result wildly out of line with price)
+    # and the estimate had to be forward/current-anchored instead.
     adjustments = []
-    if reorganized:
-        adjustments.append("merger_distortion")
+    if low_confidence_valuation:
+        adjustments.append("multiples_unreliable")
     internal_fv = internal_dcf_result["fair_value"] if internal_dcf_result["meaningful"] else None
     ext_fv = external_dcf_val
 
@@ -167,9 +170,9 @@ def compute_blended_valuation(
         if ext_ratio > 2.0:
             confidence = "medium"
 
-    # A reorganized/merger-distorted entity has a structurally broken multi-year
-    # history; the estimate is forward-anchored and inherently low-confidence.
-    if reorganized:
+    # When the multi-year multiples were unreliable, the estimate is forward-
+    # anchored and inherently low-confidence.
+    if low_confidence_valuation:
         confidence = "low"
 
     weighted = round(weighted, 2)
