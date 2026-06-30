@@ -156,20 +156,33 @@ and efficiency (gross margin, asset turnover), returning an integer 0–9.
 
 ### 2. Data aggregation layer (`backend/routers/`)
 
-- **Market data** comes from `yfinance` (prices, fundamentals, balance sheet, cash
-  flow) and **Financial Modeling Prep** (external DCF). `/fx-rate` converts non-USD
-  instruments to USD for portfolio totals.
-- **Automatic FMP fallback** (`services/fmp_fallback.py`). `yfinance` is the
-  primary, always-live source, but it rate-limits. When a request to `/analyze`,
-  `/price-history`, `/financials`, or `/metrics` hits a throttle (an explicit
-  "Too Many Requests" / `429`, or the common silent symptom of empty data),
-  the endpoint automatically retries the same request against FMP's equivalents
-  (`/quote`, `/profile`, `/income-statement`, `/cash-flow-statement`, `/ratios`,
-  `/historical-price-eod`) and reshapes the result into the **same response
-  shape**. Unavailable fields return `null` rather than crashing. `/analyze`'s
-  fallback is intentionally degraded (price/name/sector/currency with a note;
-  the multi-year valuation engine is not reconstructed). Every served request
-  logs its source (`yfinance` | `fmp_fallback`).
+- **Three-provider data chain with automatic failover.** `yfinance` is an
+  unofficial scraper whose requests get blocked from cloud IPs unpredictably, so it
+  is treated as opportunistic rather than authoritative. The resolver
+  (`routers/analyze.py` → `_resolve_market_data`) tries providers in order and the
+  full valuation engine runs on whichever succeeds:
+  1. **`yfinance`** — tried first for speed/freshness when the host IP isn't blocked.
+  2. **Financial Modeling Prep (PRIMARY)** — an official API. When yfinance is
+     blocked or empty, `services/fmp_fallback.py` builds a yfinance-shaped adapter
+     (an `info` dict + `financials`/`balance_sheet`/`cashflow`/`quarterly_balance_sheet`
+     DataFrames + `history()`) from FMP's statement endpoints, so the **entire** DCF /
+     F-Score / relative-value / merger-guard pipeline runs unchanged on FMP data —
+     a full valuation, not a degraded response.
+  3. **Finnhub (last resort)** — `services/finnhub_fallback.py`. If both yfinance and
+     FMP are unavailable, Finnhub (60 req/min free) provides at least basic
+     quote/metric data. Its free fundamentals coverage is thinner, so this tier is
+     intentionally degraded (price/name/sector with null valuation).
+  Combining a daily-capped provider (FMP, 250/day) with a per-minute-capped one
+  (Finnhub) yields more combined headroom than either alone. Unavailable fields
+  return `null` rather than crashing; every request logs its source
+  (`yfinance` | `fmp` | `fmp_fallback` | `finnhub_fallback`).
+- **Full-valuation cache** (`routers/analyze.py`). Because FMP is now the primary
+  source (not a rare fallback), a successful full valuation is cached per ticker for
+  3 hours regardless of which provider produced it, to stay within FMP's 250/day
+  budget. A cold `/analyze` costs ~8 FMP calls; a cache hit costs zero. Degraded
+  (quote-only) responses are never cached, so the app recovers full data as soon as a
+  provider does.
+- **External DCF + FX** also use FMP. `/fx-rate` converts non-USD instruments to USD.
 - **Ownership data** comes from **SEC EDGAR**: `/insider-trades` parses Form 4
   filings; `/institutional-holdings` reads 13F holdings. Both fan out concurrently
   with a `ThreadPoolExecutor` (see Engineering Highlights).
@@ -270,8 +283,9 @@ All backend endpoints (FastAPI, served with OpenAPI docs at `/docs`):
 **Frontend** — Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS v4,
 Recharts, Framer Motion, jsPDF + html2canvas-pro, `@supabase/ssr`.
 
-**Backend** — FastAPI, Uvicorn, `yfinance`, Financial Modeling Prep, SEC EDGAR,
-LLM SDKs (Groq, Google Generative AI, Cerebras), Resend, `pandas` (via yfinance).
+**Backend** — FastAPI, Uvicorn, market-data chain (Financial Modeling Prep as
+primary, `yfinance` opportunistic, Finnhub as backup), SEC EDGAR, LLM SDKs (Groq,
+Google Generative AI, Cerebras), Resend, `pandas`.
 
 **Data & Auth** — Supabase (Postgres + Auth + Row-Level Security).
 
@@ -380,12 +394,24 @@ Stated honestly so the boundaries are clear:
   (mainly Recharts generic mismatches and Supabase callback `any`s) are currently
   not enforced at build time (`next.config.ts` → `ignoreBuildErrors`). Behavior is
   unaffected; resolving them is tracked work.
-- **External-API dependence.** Data quality and availability depend on yfinance, FMP,
-  SEC EDGAR, and the LLM providers, including their free-tier rate limits. The
-  yfinance→FMP fallback, LLM provider chain, and best-effort aggregation mitigate
-  but do not eliminate this — and the FMP fallback cache is also in-process, so it
-  shares the single-instance limitation noted above. FMP itself has a limited daily
-  free-tier quota, which the 60-second fallback cache is designed to protect.
+- **External-API dependence & FMP budget.** With FMP as the primary source, a cold
+  `/analyze` costs ~8 FMP calls, so the free 250/day cap covers ~30 unique cold
+  tickers/day. The 3-hour valuation cache, the yfinance-first ordering, and the
+  Finnhub tier mitigate this, but high unique-ticker traffic can still exhaust FMP's
+  daily quota (after which the app degrades to Finnhub/quote-only). The cache is
+  in-process, so it shares the single-instance limitation above.
+- **FMP-path valuation is more conservative.** FMP's free tier lacks forward
+  analyst growth estimates, so on the FMP path the internal DCF falls back to a
+  historical FCF CAGR — a supported but more conservative path that can lower the
+  DCF leg of the consensus versus the yfinance path. Relative value and the external
+  FMP DCF still anchor the estimate.
+- **Stock-split distortion on the FMP path.** FMP reports per-period share counts
+  as-reported (not split-adjusted), so a recent stock split shows up as a large
+  share-count jump. The merger/reorganization guard correctly flags such cases as
+  low-confidence rather than emitting a confident wrong number, but the relative-value
+  multiple for a recently-split name on the FMP path can be unreliable until adjusted.
+- **Finnhub key is optional/pending.** The third tier is built and structurally
+  verified; live behavior requires `FINNHUB_API_KEY` to be set.
 
 Planned and tracked improvements are detailed in
 [docs/Development.md](docs/Development.md#future-improvements).

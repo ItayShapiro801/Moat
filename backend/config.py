@@ -7,6 +7,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
+# Third-tier market-data provider (60 req/min free). Resilience when both
+# yfinance and FMP are unavailable. Optional; degrades gracefully if unset.
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 
 # Comma-separated list of browser origins allowed by CORS. Defaults to the local
 # dev frontend; in production set CORS_ALLOWED_ORIGINS to the deployed site URL(s).

@@ -19,40 +19,86 @@ from services.piotroski import compute_piotroski
 from services.dcf import compute_internal_dcf, fetch_external_dcf
 from services.relative_value import detect_reorganization, compute_relative_value
 from services.blend import compute_blended_valuation
-from services.fmp_fallback import (
-    is_rate_limited, log_source,
-    analyze_fallback, price_history_fallback, financials_fallback, metrics_fallback,
-)
+from services import fmp_fallback as fmp
+from services import finnhub_fallback as finnhub
+from services.fmp_fallback import is_rate_limited, log_source, build_fmp_bundle
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# Full-valuation cache (Part 4). FMP is now the PRIMARY source, so it is hit far
+# more often than when it was a rare fallback. A successful FULL valuation is
+# cached per ticker for a few hours, regardless of which source produced it, to
+# stay within FMP's 250/day budget and absorb popular-ticker traffic. Degraded
+# (quote-only) responses are never cached, so the app recovers full data as soon
+# as a provider does. Trade-off: a cached price can be up to VALUATION_TTL stale;
+# the /price-history chart has its own fresher path.
+# ---------------------------------------------------------------------------
+import time as _time
+
+VALUATION_TTL = 3 * 3600  # 3 hours
+_VALUATION_CACHE: dict[str, tuple] = {}
+
+
+def _valuation_cache_get(ticker: str):
+    entry = _VALUATION_CACHE.get(ticker)
+    if entry and (_time.time() - entry[0]) < VALUATION_TTL:
+        return entry[1]
+    return None
+
+
+def _valuation_cache_set(ticker: str, payload: dict) -> None:
+    _VALUATION_CACHE[ticker] = (_time.time(), payload)
+
+
+def _resolve_market_data(ticker: str):
+    """Acquire data for the FULL valuation engine, trying providers in order and
+    returning (stock_like, info, source). yfinance is tried first for speed/
+    freshness; if it's blocked or empty, FMP becomes the full primary source via
+    an adapter that mimics yfinance's shape so the engine runs unchanged.
+    Returns (None, None, None) when no FULL-data provider is available (the caller
+    then degrades to a quote-only response)."""
+    # 1. yfinance — fast and fresh when the host IP isn't blocked.
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        if info and (info.get("currentPrice") is not None or info.get("regularMarketPrice") is not None):
+            return stock, info, "yfinance"
+    except Exception:
+        pass
+    # 2. FMP — official API, full valuation pipeline via the adapter.
+    bundle = build_fmp_bundle(ticker)
+    if bundle is not None:
+        stock, info = bundle
+        return stock, info, "fmp"
+    # 3. No full-data provider; caller handles degraded quote-only path.
+    return None, None, None
 
 @router.get("/analyze/{ticker}")
 def analyze(ticker: str):
     ticker = ticker.upper()
-    rate_limited = False
-    try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-    except Exception as e:
-        if is_rate_limited(e):
-            rate_limited = True
-            info = None
-        else:
-            raise HTTPException(status_code=404, detail=f"Could not fetch data for {ticker}: {e}")
 
-    # Empty info with no price is yfinance's common *silent* rate-limit symptom
-    # (it returns {} rather than raising). Treat both that and an explicit 429 as
-    # a trigger to try the FMP fallback before giving up.
-    if not info or (info.get("regularMarketPrice") is None and info.get("currentPrice") is None):
-        fb = analyze_fallback(ticker)
-        if fb is not None:
-            log_source("analyze", ticker, "fmp_fallback")
-            return fb
-        if rate_limited:
-            raise HTTPException(status_code=503, detail=f"Data temporarily unavailable for {ticker} (rate-limited).")
-        raise HTTPException(status_code=404, detail=f"No data found for ticker {ticker}")
+    # Serve a recent full valuation from cache without touching any provider.
+    cached = _valuation_cache_get(ticker)
+    if cached is not None:
+        return cached
 
-    log_source("analyze", ticker, "yfinance")
+    # Resolve a FULL-data provider: yfinance -> FMP (full, via adapter).
+    stock, info, source = _resolve_market_data(ticker)
+    if stock is None:
+        # No full-data provider. Degrade to a quote-only response: FMP first,
+        # then Finnhub (the last-resort backup). Degraded responses are NOT cached.
+        for fb_fn, src in (
+            (fmp.analyze_fallback, "fmp_fallback"),
+            (finnhub.analyze_fallback, "finnhub_fallback"),
+        ):
+            fb = fb_fn(ticker)
+            if fb is not None:
+                log_source("analyze", ticker, src)
+                return fb
+        raise HTTPException(status_code=503, detail=f"Data temporarily unavailable for {ticker}.")
+
+    log_source("analyze", ticker, source)
 
     current_price = safe_get(info, "currentPrice") or safe_get(info, "regularMarketPrice", 0)
     company_name = safe_get(info, "longName") or safe_get(info, "shortName", ticker)
@@ -175,7 +221,7 @@ def analyze(ticker: str):
 
     dcf_excluded = "sector_excluded_dcf" in blend["adjustments_applied"]
 
-    return {
+    payload = {
         "ticker": ticker,
         "company_name": company_name,
         "current_price": round(current_price, 2),
@@ -214,7 +260,14 @@ def analyze(ticker: str):
             "equity_value": dcf_result["equity_value"],
             "net_debt": round(safe_get(info, "totalDebt", 0) - safe_get(info, "totalCash", 0)),
         },
+        # When yfinance served this, the field is absent (matches prior behavior);
+        # for FMP-sourced full valuations it records the primary source.
+        **({"data_source": source} if source != "yfinance" else {}),
     }
+    # Cache full valuations (Part 4) regardless of source. Degraded responses
+    # (handled above) are never cached, so the app recovers full data promptly.
+    _valuation_cache_set(ticker, payload)
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -237,10 +290,14 @@ def price_history(ticker: str, period: str = "1y"):
         hist = None  # rate-limit or transient error -> try fallback below
 
     if hist is None or hist.empty:
-        fb = price_history_fallback(ticker, period)
-        if fb is not None:
-            log_source("price-history", ticker, "fmp_fallback")
-            return fb
+        for fb_fn, src in (
+            (fmp.price_history_fallback, "fmp_fallback"),
+            (finnhub.price_history_fallback, "finnhub_fallback"),
+        ):
+            fb = fb_fn(ticker, period)
+            if fb is not None:
+                log_source("price-history", ticker, src)
+                return fb
         raise HTTPException(status_code=404, detail=f"No price history for {ticker}")
     log_source("price-history", ticker, "yfinance")
     # yfinance can return NaN/Inf closes for some dates (gaps, partial data).
@@ -316,12 +373,16 @@ def financials_endpoint(ticker: str):
     except Exception:
         inc = cf = bs = None
 
-    # Empty income statement is the rate-limit symptom; try FMP before degrading.
+    # Empty income statement is the rate-limit symptom; try FMP then Finnhub.
     if inc is None or getattr(inc, "empty", True):
-        fb = financials_fallback(ticker)
-        if fb is not None:
-            log_source("financials", ticker, "fmp_fallback")
-            return fb
+        for fb_fn, src in (
+            (fmp.financials_fallback, "fmp_fallback"),
+            (finnhub.financials_fallback, "finnhub_fallback"),
+        ):
+            fb = fb_fn(ticker)
+            if fb is not None:
+                log_source("financials", ticker, src)
+                return fb
         # No fallback data: fall through with empty frames -> empty arrays (prior behavior).
         import pandas as pd
         inc = inc if inc is not None else pd.DataFrame()
@@ -396,13 +457,17 @@ def metrics_endpoint(ticker: str):
     except Exception:
         info = {}
 
-    # Empty info (no market cap / price) is the rate-limit symptom; try FMP first.
+    # Empty info (no market cap / price) is the rate-limit symptom; try FMP then Finnhub.
     if not info or (info.get("marketCap") is None and info.get("currentPrice") is None
                     and info.get("regularMarketPrice") is None):
-        fb = metrics_fallback(ticker)
-        if fb is not None:
-            log_source("metrics", ticker, "fmp_fallback")
-            return fb
+        for fb_fn, src in (
+            (fmp.metrics_fallback, "fmp_fallback"),
+            (finnhub.metrics_fallback, "finnhub_fallback"),
+        ):
+            fb = fb_fn(ticker)
+            if fb is not None:
+                log_source("metrics", ticker, src)
+                return fb
     else:
         log_source("metrics", ticker, "yfinance")
 

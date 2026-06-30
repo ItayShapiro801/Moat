@@ -19,6 +19,8 @@ import time
 import json as json_mod
 import urllib.request
 
+import pandas as pd
+
 from config import FMP_API_KEY
 
 FMP_BASE = "https://financialmodelingprep.com/stable"
@@ -305,3 +307,160 @@ def metrics_fallback(ticker: str) -> dict | None:
     }
     _cache_set(cache_key, payload)
     return payload
+
+
+# ---------------------------------------------------------------------------
+# FMP PRIMARY adapter
+#
+# yfinance is an unofficial scraper that gets cloud IPs blocked. FMP is an
+# official API. To make FMP a *full* primary source (not just a degraded
+# fallback) without rewriting the valuation engine, we expose FMP data through
+# objects that quack like yfinance: an `info` dict with the same keys the engine
+# reads, and a stock-like object whose .financials / .balance_sheet / .cashflow /
+# .quarterly_balance_sheet / .history() return pandas DataFrames in yfinance's
+# shape (index = row labels, columns = period-end Timestamps, newest-first).
+# The entire DCF / F-Score / relative-value / merger-guard pipeline then runs
+# unchanged on FMP data.
+# ---------------------------------------------------------------------------
+
+# yfinance income-statement row label -> FMP income-statement field
+_INC_MAP = {
+    "Net Income": "netIncome",
+    "Total Revenue": "revenue",
+    "Cost Of Revenue": "costOfRevenue",
+    "Operating Income": "operatingIncome",
+    "EBITDA": "ebitda",
+    "Gross Profit": "grossProfit",
+}
+_BS_MAP = {
+    "Total Assets": "totalAssets",
+    "Current Assets": "totalCurrentAssets",
+    "Current Liabilities": "totalCurrentLiabilities",
+    "Long Term Debt": "longTermDebt",
+    "Stockholders Equity": "totalStockholdersEquity",
+}
+_CF_MAP = {
+    "Operating Cash Flow": "operatingCashFlow",
+    "Capital Expenditure": "capitalExpenditure",
+    "Free Cash Flow": "freeCashFlow",
+}
+
+
+def _stmt_df(rows, field_map, shares_from_rows=None):
+    """Build a yfinance-shaped DataFrame from an FMP statement array.
+    index = row labels, columns = period-end Timestamps (newest-first)."""
+    if not rows:
+        return pd.DataFrame()
+    cols = []
+    for r in rows:
+        d = r.get("date") or (f"{r.get('fiscalYear')}-12-31" if r.get("fiscalYear") else None)
+        cols.append(pd.Timestamp(d) if d else pd.Timestamp("1970-01-01"))
+    data = {label: [_num(r.get(f)) for r in rows] for label, f in field_map.items()}
+    df = pd.DataFrame(data, index=cols).T  # rows=labels, cols=dates
+    if shares_from_rows is not None:
+        # Share count per period (FMP reports it on the income statement).
+        df.loc["Share Issued"] = [_num(r.get("weightedAverageShsOut")) for r in shares_from_rows]
+    return df
+
+
+class _FmpStock:
+    """Minimal yfinance.Ticker stand-in backed by FMP statement arrays."""
+
+    def __init__(self, info, financials, balance_sheet, cashflow, quarterly_bs, prices):
+        self.info = info
+        self.financials = financials
+        self.balance_sheet = balance_sheet
+        self.cashflow = cashflow
+        self._quarterly_bs = quarterly_bs
+        self._prices = prices  # DataFrame indexed by date with a "Close" column
+
+    @property
+    def quarterly_balance_sheet(self):
+        return self._quarterly_bs
+
+    def history(self, period="5y", **kwargs):
+        return self._prices if self._prices is not None else pd.DataFrame()
+
+
+def build_fmp_bundle(ticker: str):
+    """Return (stock_like, info) backed by FMP for the FULL valuation engine,
+    or None if FMP can't provide the essentials. Costs ~6 FMP calls (cached for
+    the fallback window); the caller should layer the longer valuation cache."""
+    quote = _first(_fmp_get(f"quote?symbol={ticker}")) or {}
+    profile = _first(_fmp_get(f"profile?symbol={ticker}")) or {}
+    inc = _fmp_get(f"income-statement?symbol={ticker}&limit=5")
+    bs = _fmp_get(f"balance-sheet-statement?symbol={ticker}&limit=5")
+    cf = _fmp_get(f"cash-flow-statement?symbol={ticker}&limit=5")
+    inc = inc if isinstance(inc, list) else []
+    bs = bs if isinstance(bs, list) else []
+    cf = cf if isinstance(cf, list) else []
+
+    price = _num(quote.get("price")) or _num(profile.get("price"))
+    if price is None or not inc:
+        return None  # without a price and statements there's no full valuation
+
+    market_cap = _num(quote.get("marketCap")) or _num(profile.get("marketCap"))
+    shares = market_cap / price if (market_cap and price) else _num(inc[0].get("weightedAverageShsOut"))
+
+    financials = _stmt_df(inc, _INC_MAP)
+    balance_sheet = _stmt_df(bs, _BS_MAP, shares_from_rows=inc)
+    cashflow = _stmt_df(cf, _CF_MAP)
+
+    # Quarterly share series for the merger guard (best-effort; free tier allows it).
+    quarterly_bs = pd.DataFrame()
+    qinc = _fmp_get(f"income-statement?symbol={ticker}&period=quarter&limit=6")
+    if isinstance(qinc, list) and qinc:
+        quarterly_bs = _stmt_df(qinc, {}, shares_from_rows=qinc)
+
+    # 5y daily closes for relative-value historical multiples.
+    prices_df = None
+    hist = _fmp_get(f"historical-price-eod/light?symbol={ticker}")
+    if isinstance(hist, list) and hist:
+        rows = [(pd.Timestamp(str(h.get("date"))[:10]), _num(h.get("price"))) for h in hist if h.get("date")]
+        rows = [(d, p) for d, p in rows if p is not None]
+        rows.sort(key=lambda x: x[0])  # ascending, like yfinance
+        if rows:
+            prices_df = pd.DataFrame({"Close": [p for _, p in rows]}, index=[d for d, _ in rows])
+
+    latest_inc = inc[0]
+    latest_bs = bs[0] if bs else {}
+    latest_cf = cf[0] if cf else {}
+    total_debt = _num(latest_bs.get("totalDebt")) or 0
+    total_cash = _num(latest_bs.get("cashAndCashEquivalents")) or 0
+    equity = _num(latest_bs.get("totalStockholdersEquity"))
+    eps = _num(latest_inc.get("eps"))
+    revenue = _num(latest_inc.get("revenue"))
+    fcf = _num(latest_cf.get("freeCashFlow"))
+    ebitda = _num(latest_inc.get("ebitda"))
+    is_fund = bool(profile.get("isEtf") or profile.get("isFund"))
+
+    info = {
+        "currentPrice": price,
+        "regularMarketPrice": price,
+        "longName": profile.get("companyName") or quote.get("name") or ticker,
+        "shortName": profile.get("companyName") or ticker,
+        "sector": profile.get("sector") or "",
+        "industry": profile.get("industry") or "",
+        "quoteType": "ETF" if is_fund else "EQUITY",
+        "currency": profile.get("currency") or "USD",
+        "beta": _num(profile.get("beta")) or 1.0,
+        "sharesOutstanding": shares,
+        "totalDebt": total_debt,
+        "totalCash": total_cash,
+        "marketCap": market_cap,
+        "trailingEps": eps,
+        "revenuePerShare": (revenue / shares) if (revenue and shares) else None,
+        "freeCashflow": fcf,
+        "ebitda": ebitda,
+        "enterpriseValue": (market_cap + total_debt - total_cash) if market_cap else None,
+        "bookValue": (equity / shares) if (equity and shares) else None,
+        # Forward estimates aren't on FMP's free tier; the DCF growth model falls
+        # back to historical CAGR when these are absent (a supported code path).
+        "earningsGrowth": None,
+        "revenueGrowth": None,
+        "forwardEps": None,
+        "longBusinessSummary": (profile.get("description") or "")[:2000],
+    }
+
+    stock = _FmpStock(info, financials, balance_sheet, cashflow, quarterly_bs, prices_df)
+    return stock, info
