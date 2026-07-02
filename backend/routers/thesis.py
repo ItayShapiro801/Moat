@@ -190,13 +190,12 @@ def _generate_valuation_review(ticker: str):
 
 
 def _generate_thesis(ticker: str):
-    try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Could not fetch data for {ticker}: {e}")
-    if not info or (info.get("regularMarketPrice") is None and info.get("currentPrice") is None):
-        raise HTTPException(status_code=404, detail=f"No data found for ticker {ticker}")
+    # Use the /analyze resolver (yfinance -> FMP adapter) so the thesis still works
+    # when yfinance is IP-blocked. No provider -> no thesis (stale-serve covers it).
+    from routers.analyze import _resolve_market_data
+    stock, info, _src = _resolve_market_data(ticker)
+    if stock is None:
+        return {"ticker": ticker}, False
 
     business_summary = safe_get(info, "longBusinessSummary", "") or ""
     sector = safe_get(info, "sector")

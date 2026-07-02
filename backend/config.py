@@ -3,6 +3,17 @@ import os
 
 load_dotenv()
 FMP_API_KEY = os.getenv("FMP_API_KEY", "")
+# Multiple FMP keys multiply the free 250/day cap (each key is a separate free
+# account). The backend rotates through them, moving to the next only when one is
+# rate-limited. Set FMP_API_KEY plus optional FMP_API_KEY_2 / FMP_API_KEY_3 in
+# the host env. Order is preserved; blanks are ignored.
+FMP_API_KEYS = [
+    k for k in (
+        FMP_API_KEY,
+        os.getenv("FMP_API_KEY_2", ""),
+        os.getenv("FMP_API_KEY_3", ""),
+    ) if k
+]
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")

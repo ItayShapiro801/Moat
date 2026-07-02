@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from config import INVESTORS
 from utils import *
 from services.llm_providers import *
-from routers.analyze import gather_fundamentals
+from routers.analyze import gather_fundamentals, _resolve_market_data
 
 router = APIRouter()
 
@@ -86,13 +86,12 @@ def investors_endpoint(ticker: str, refresh: bool = False):
 
     def _generate():
         global _CONSOLIDATED_INVESTOR_SYSTEM
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-        except Exception as e:
-            raise HTTPException(status_code=404, detail=f"Could not fetch data for {ticker}: {e}")
-        if not info or (info.get("regularMarketPrice") is None and info.get("currentPrice") is None):
-            raise HTTPException(status_code=404, detail=f"No data found for ticker {ticker}")
+        # Use the same resolver as /analyze (yfinance -> FMP adapter) so investor
+        # takes still work when yfinance is IP-blocked. If no full-data provider is
+        # available, return no results (stale-serve covers a prior good response).
+        stock, info, _src = _resolve_market_data(ticker)
+        if stock is None:
+            return {"ticker": ticker, "investors": []}, False
 
         facts = gather_fundamentals(ticker, stock, info)
         facts_json = json_mod.dumps(facts, indent=2, default=str)

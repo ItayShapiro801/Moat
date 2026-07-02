@@ -16,12 +16,14 @@ Design rules (per product spec):
 from __future__ import annotations
 
 import time
+import threading
 import json as json_mod
 import urllib.request
+import urllib.error
 
 import pandas as pd
 
-from config import FMP_API_KEY
+from config import FMP_API_KEY, FMP_API_KEYS
 
 FMP_BASE = "https://financialmodelingprep.com/stable"
 FALLBACK_CACHE_TTL = 60  # seconds; fallback path only
@@ -71,18 +73,67 @@ def _cache_set(key: str, value) -> None:
 # Low-level FMP fetch
 # ---------------------------------------------------------------------------
 
+# --- Multi-key rotation ---------------------------------------------------
+# Each FMP key has its own 250/day cap. We drain one key until it reports a
+# rate-limit, then advance to the next — so N keys give ~N*250 calls/day. A
+# capped key is put on a cooldown (re-tried later, since the daily cap resets)
+# instead of being retried on every request.
+_KEY_COOLDOWN = 30 * 60  # seconds before re-trying a capped key
+_key_lock = threading.Lock()
+_key_spent_until: dict[int, float] = {}  # key index -> epoch it may be retried
+_key_cursor = [0]                        # start-from index (advances as keys cap)
+
+
+def _is_fmp_limit_body(data) -> bool:
+    """FMP sometimes returns HTTP 200 with a limit-reached error object."""
+    if isinstance(data, dict):
+        msg = str(data.get("Error Message") or data.get("error") or data.get("message") or "").lower()
+        return "limit" in msg or "upgrade" in msg
+    return False
+
+
+def _mark_spent(i: int) -> None:
+    with _key_lock:
+        _key_spent_until[i] = time.time() + _KEY_COOLDOWN
+        if FMP_API_KEYS:
+            _key_cursor[0] = (i + 1) % len(FMP_API_KEYS)
+
+
+def _key_order():
+    """Indices of currently-usable keys, starting from the active cursor."""
+    now = time.time()
+    n = len(FMP_API_KEYS)
+    return [
+        (_key_cursor[0] + off) % n
+        for off in range(n)
+        if _key_spent_until.get((_key_cursor[0] + off) % n, 0) <= now
+    ]
+
+
 def _fmp_get(path: str):
-    """GET an FMP `stable` endpoint, return parsed JSON or None. Never raises."""
-    if not FMP_API_KEY:
+    """GET an FMP `stable` endpoint, rotating across API keys on rate-limit.
+    Returns parsed JSON or None. Never raises."""
+    if not FMP_API_KEYS:
         return None
     sep = "&" if "?" in path else "?"
-    url = f"{FMP_BASE}/{path}{sep}apikey={FMP_API_KEY}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            return json_mod.loads(resp.read())
-    except Exception:
-        return None
+    for i in _key_order():
+        url = f"{FMP_BASE}/{path}{sep}apikey={FMP_API_KEYS[i]}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json_mod.loads(resp.read())
+            if _is_fmp_limit_body(data):
+                _mark_spent(i)          # this key is capped -> try the next one
+                continue
+            return data
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 402, 403):
+                _mark_spent(i)          # rate-limited / quota -> next key
+                continue
+            return None                 # other HTTP error -> don't burn more keys
+        except Exception:
+            return None                 # network/timeout -> give up
+    return None                         # all keys exhausted for now
 
 
 def _first(data):

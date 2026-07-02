@@ -112,16 +112,14 @@ def compute_internal_dcf(info, fcf_5yr, sector):
 
 
 def fetch_external_dcf(ticker: str) -> float | None:
-    if not FMP_API_KEY:
-        return None
-    url = f"https://financialmodelingprep.com/stable/discounted-cash-flow?symbol={ticker}&apikey={FMP_API_KEY}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    # Route through the shared FMP client so it uses the same multi-key rotation
+    # and rate-limit handling as the rest of the FMP calls.
+    from services.fmp_fallback import _fmp_get
+    data = _fmp_get(f"discounted-cash-flow?symbol={ticker}")
     try:
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json_mod.loads(resp.read())
         if isinstance(data, list) and data:
             return float(data[0].get("dcf", 0))
-        if isinstance(data, dict):
+        if isinstance(data, dict) and "dcf" in data:
             return float(data.get("dcf", 0))
     except Exception:
         pass
