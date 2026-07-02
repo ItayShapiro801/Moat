@@ -38,8 +38,9 @@ renders results and manages auth/portfolio state.
 
 The core idea is a **valuation pipeline**: pull a company's fundamentals from market
 data providers, run several independent valuation methods, and blend them into a
-single intrinsic-value estimate with a confidence rating. Narrative features
-(thesis, investor-persona evaluations, deep-research report, portfolio insights)
+single intrinsic-value estimate with a confidence rating. An **AI reviewer** then
+gives a second opinion on that estimate. Narrative features (thesis, investor-persona
+evaluations, deep-research report, valuation review, portfolio insights)
 are built on top by feeding the same computed data to an LLM under a fixed JSON
 schema.
 
@@ -154,6 +155,17 @@ The same module computes the **Piotroski F-Score** (`piotroski.py`): the standar
 accruals), leverage/liquidity (long-term debt ratio, current ratio, share count),
 and efficiency (gross margin, asset turnover), returning an integer 0–9.
 
+**AI valuation reviewer** (`/valuation-review`, in `routers/thesis.py`) — a *second
+opinion* on the quantitative model. The deterministic engine remains the auditable
+anchor; an LLM then judges its output against the fundamentals and, when it
+disagrees, supplies its own grounded intrinsic-value estimate and range. It reuses
+the already-cached `analyze` + `metrics` data (no extra upstream cost) and is
+prompted to reason **only** from the provided numbers, never fabricate figures, and
+prefer a low-confidence/wide range over false precision — it reviews and judges, it
+does not do the DCF math. Returns a structured verdict (`reasonable` / `too_high` /
+`too_low` / `unreliable`), an agree/disagree flag, its own fair value + low/high
+range, a confidence level, and a short rationale.
+
 ### 2. Data aggregation layer (`backend/routers/`)
 
 - **Three-provider data chain with automatic failover.** `yfinance` is an
@@ -176,12 +188,20 @@ and efficiency (gross margin, asset turnover), returning an integer 0–9.
   (Finnhub) yields more combined headroom than either alone. Unavailable fields
   return `null` rather than crashing; every request logs its source
   (`yfinance` | `fmp` | `fmp_fallback` | `finnhub_fallback`).
-- **Full-valuation cache** (`routers/analyze.py`). Because FMP is now the primary
-  source (not a rare fallback), a successful full valuation is cached per ticker for
-  3 hours regardless of which provider produced it, to stay within FMP's 250/day
-  budget. A cold `/analyze` costs ~8 FMP calls; a cache hit costs zero. Degraded
-  (quote-only) responses are never cached, so the app recovers full data as soon as a
-  provider does.
+- **Full-valuation cache + stale-serve** (`routers/analyze.py`). Because FMP is now
+  the primary source (not a rare fallback), a successful full valuation is cached per
+  ticker for **24 h** regardless of which provider produced it, to stay within FMP's
+  250/day budget. A cold `/analyze` costs ~8 FMP calls; a cache hit costs zero. When
+  every provider is exhausted, analyze **serves the last good full valuation (any
+  age)** rather than degrading — a day-old full analysis beats "limited data mode".
+  Only when a ticker has *never* been fetched does it fall back to a quote-only
+  response, which is never cached so the app recovers full data as soon as a provider
+  does.
+- **Supporting-data cache + stampede lock** (`/metrics`, `/financials`,
+  `/price-history`). One page load fetches these from several components at once, so
+  they carry a 15-minute cache and a per-key lock that collapses a burst of identical
+  concurrent requests into a single upstream call — cutting redundant yfinance/FMP
+  traffic and speeding repeat loads to ~0.2s.
 - **External DCF + FX** also use FMP. `/fx-rate` converts non-USD instruments to USD.
 - **Ownership data** comes from **SEC EDGAR**: `/insider-trades` parses Form 4
   filings; `/institutional-holdings` reads 13F holdings. Both fan out concurrently
@@ -210,8 +230,11 @@ and efficiency (gross margin, asset turnover), returning an integer 0–9.
   (**Groq → Gemini → Cerebras**), skipping any without a configured key, and returns
   the first response that parses as JSON. All providers are called in JSON-mode with
   a fixed temperature.
-- **Response cache.** Generated narrative responses are cached in-memory with a TTL
-  (12h for thesis/investors, 24h for deep research).
+- **Response cache + stale-serve.** Generated narrative responses (thesis,
+  investors, deep-research, valuation-review) are cached in-memory for **2 days**.
+  If a fresh generation fails (all LLM providers rate-limited, or the underlying
+  market data is unavailable), the cache **serves the last good result** rather than
+  an empty "unavailable" payload.
 - **Cache-stampede protection.** Per-cache-key locks ensure that when multiple
   requests hit the same uncached ticker simultaneously, only the first triggers
   generation; the rest wait and reuse the result.
@@ -243,10 +266,13 @@ All of the following are present in the codebase:
 - **Market-data fallback with rate-limit detection** — when the primary source
   (`yfinance`) throttles, the data endpoints transparently fail over to FMP and
   reshape responses to match, with per-source logging (see Data aggregation layer).
-- **In-memory TTL cache + per-key stampede locks** — see the LLM orchestration layer
-  above. The FMP fallback path adds its own short **60-second cache** (keyed by
-  ticker), applied *only* to fallback responses, to protect FMP's limited daily
-  budget during a throttling window. The primary `yfinance` path is never cached.
+- **Layered caching, stale-serve, stampede locks & warmup** — to survive a free-tier
+  backend (Render sleeps after ~15 min; its cloud IP is blocked by Yahoo/SEC). Full
+  valuations cache 24h, narrative endpoints 2 days, supporting data 15 min, the FMP
+  degraded path 60s; per-key locks collapse concurrent duplicate requests into one
+  upstream call; when providers are exhausted the caches **serve the last good result**
+  instead of degrading; and a background thread **pre-warms** popular tickers 30s after
+  startup so the first real user isn't the one paying the cold-start cost.
 - **Concurrent API aggregation** — SEC EDGAR fan-out via `ThreadPoolExecutor`
   (`max_workers` of 3–4) in `ownership.py`.
 - **Best-effort fan-in** — the deep-research aggregator isolates each sub-fetch with
@@ -264,6 +290,7 @@ All backend endpoints (FastAPI, served with OpenAPI docs at `/docs`):
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/analyze/{ticker}` | Blended intrinsic value, F-Score, scenarios, confidence |
+| GET | `/valuation-review/{ticker}` | AI second opinion on the model's valuation |
 | GET | `/price-history/{ticker}` | Historical prices |
 | GET | `/financials/{ticker}` | Financial statement series |
 | GET | `/metrics/{ticker}` | Derived ratios + analyst data |
@@ -273,10 +300,11 @@ All backend endpoints (FastAPI, served with OpenAPI docs at `/docs`):
 | GET | `/deep-research/{ticker}` | Aggregated multi-source LLM report |
 | GET | `/screener` | Filter the precomputed S&P 500 cache |
 | GET | `/insider-trades/{ticker}` | SEC Form 4 activity |
-| GET | `/institutional-holdings/{ticker}` | 13F holdings |
+| GET | `/institutional-holdings/{ticker}` | 13F holdings (stale-serves when EDGAR is down) |
 | GET | `/search` | Ticker/instrument search |
 | POST | `/portfolio-insights` | LLM assessment of a holdings set |
 | POST | `/email-report` | Email a generated PDF (optional, off by default) |
+| GET | `/warmup`, `/health` | Cache warmup (also auto-runs 30s post-startup) + liveness |
 
 ## Tech Stack
 
