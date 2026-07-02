@@ -33,6 +33,13 @@ def _cache_set(key, value):
     _AI_CACHE[key] = (time.time(), value)
 
 
+def _cache_get_stale(key):
+    """Return the last cached value regardless of age (None if never cached).
+    Used to serve stale-but-real data when a fresh generation fails."""
+    entry = _AI_CACHE.get(key)
+    return entry[1] if entry else None
+
+
 # Per-key locks prevent a "cache stampede": when many requests hit the SAME
 # uncached ticker at once, only the first generates; the rest wait and reuse it.
 
@@ -67,6 +74,13 @@ def _cached_or_generate(key, ttl, refresh, generate_fn):
         payload, should_cache = generate_fn()
         if should_cache:
             _cache_set(key, payload)
+            return payload
+        # Generation failed/empty (e.g. all LLM providers rate-limited, or the
+        # underlying market data was unavailable). Prefer a stale-but-real cached
+        # result over an empty/"unavailable" one.
+        stale = _cache_get_stale(key)
+        if stale is not None:
+            return stale
         return payload
 
 

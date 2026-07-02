@@ -36,7 +36,8 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 import time as _time
 
-VALUATION_TTL = 3 * 3600  # 3 hours
+VALUATION_TTL = 24 * 3600  # 24 hours (was 3h) — valuation is intraday-stable and
+# the deployed upstreams fail often, so a longer window avoids needless refetches.
 _VALUATION_CACHE: dict[str, tuple] = {}
 
 
@@ -45,6 +46,13 @@ def _valuation_cache_get(ticker: str):
     if entry and (_time.time() - entry[0]) < VALUATION_TTL:
         return entry[1]
     return None
+
+
+def _valuation_cache_get_stale(ticker: str):
+    """Last full valuation regardless of age — served when providers can't
+    produce a fresh one (a stale-but-real valuation beats degraded quote-only)."""
+    entry = _VALUATION_CACHE.get(ticker)
+    return entry[1] if entry else None
 
 
 def _valuation_cache_set(ticker: str, payload: dict) -> None:
@@ -139,8 +147,14 @@ def analyze(ticker: str):
     # Resolve a FULL-data provider: yfinance -> FMP (full, via adapter).
     stock, info, source = _resolve_market_data(ticker)
     if stock is None:
-        # No full-data provider. Degrade to a quote-only response: FMP first,
-        # then Finnhub (the last-resort backup). Degraded responses are NOT cached.
+        # No full-data provider right now (yfinance blocked + FMP rate-limited).
+        # Prefer a STALE full valuation over degrading — a day-old full analysis is
+        # far more useful than "limited data mode", and valuation barely moves
+        # intraday. Only degrade to quote-only if we've never had a full result.
+        stale = _valuation_cache_get_stale(ticker)
+        if stale is not None:
+            log_source("analyze", ticker, "stale_cache")
+            return stale
         for fb_fn, src in (
             (fmp.analyze_fallback, "fmp_fallback"),
             (finnhub.analyze_fallback, "finnhub_fallback"),

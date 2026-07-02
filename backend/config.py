@@ -27,9 +27,13 @@ LLM_TEMPERATURE = 0.3
 
 # In-memory TTL cache for AI-generated responses. First visitor pays the
 # generation cost; everyone after gets instant cached results.
-AI_CACHE_TTL = 12 * 3600      # /investors
-THESIS_CACHE_TTL = 24 * 3600  # /thesis (narrative, rarely changes)
-DEEP_CACHE_TTL = 24 * 3600    # /deep-research (heavier, less freshness-sensitive)
+# Longer TTLs: narrative/analysis rarely changes, and the deployed backend's
+# upstreams (yfinance blocked on cloud IPs, FMP's 250/day cap) fail often — a
+# stale-but-real result beats an "unavailable" one. Stale-serve (below) extends
+# these further when a fresh generation can't be produced.
+AI_CACHE_TTL = 48 * 3600      # /investors (2 days)
+THESIS_CACHE_TTL = 48 * 3600  # /thesis (2 days)
+DEEP_CACHE_TTL = 48 * 3600    # /deep-research (2 days)
 
 INVESTORS = [
     {
