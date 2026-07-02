@@ -27,7 +27,8 @@ LLM_TEMPERATURE = 0.3
 
 # In-memory TTL cache for AI-generated responses. First visitor pays the
 # generation cost; everyone after gets instant cached results.
-AI_CACHE_TTL = 12 * 3600      # /investors, /thesis
+AI_CACHE_TTL = 12 * 3600      # /investors
+THESIS_CACHE_TTL = 24 * 3600  # /thesis (narrative, rarely changes)
 DEEP_CACHE_TTL = 24 * 3600    # /deep-research (heavier, less freshness-sensitive)
 
 INVESTORS = [

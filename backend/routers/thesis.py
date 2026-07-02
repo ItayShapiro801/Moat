@@ -13,6 +13,7 @@ import yfinance as yf
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from config import THESIS_CACHE_TTL
 from utils import *
 from services.llm_providers import *
 from routers.analyze import analyze, metrics_endpoint, financials_endpoint
@@ -40,7 +41,7 @@ THESIS_SYSTEM = (
 def thesis_endpoint(ticker: str, refresh: bool = False):
     ticker = ticker.upper()
     return _cached_or_generate(
-        f"thesis:{ticker}", AI_CACHE_TTL, refresh, lambda: _generate_thesis(ticker)
+        f"thesis:{ticker}", THESIS_CACHE_TTL, refresh, lambda: _generate_thesis(ticker)
     )
 
 

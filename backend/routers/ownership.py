@@ -21,18 +21,31 @@ router = APIRouter()
 # Module-level caches for SEC data (mutable; reassigned via `global` below).
 _CIK_MAP: dict[str, str] = {}  # ticker -> 10-digit zero-padded CIK
 _F13_CACHE: dict[str, tuple] = {}
-_F13_TTL = 6 * 3600  # 13F filings are quarterly; 6h cache is plenty
+# 13F filings only update quarterly, so weekly is plenty — and a long TTL means a
+# blocked/slow EDGAR (cloud IPs get throttled) rarely triggers a refetch at all.
+_F13_TTL = 7 * 24 * 3600  # 7 days
+# Per-ticker cache of the combined institutional-holdings result.
+_INST_CACHE: dict[str, tuple] = {}
+_INST_TTL = 7 * 24 * 3600  # 7 days
+# Per-ticker cache of insider (Form 4) trades.
+_INSIDER_CACHE: dict[str, tuple] = {}
+_INSIDER_TTL = 6 * 3600  # 6 hours
 
 
 def _load_cik_map():
-    """Fetch and cache the SEC ticker->CIK mapping (once)."""
+    """Fetch and cache the SEC ticker->CIK mapping (once). Returns {} without
+    raising if EDGAR is unreachable, so callers degrade instead of erroring; the
+    empty map is not cached, so it retries on the next request."""
     global _CIK_MAP
     if _CIK_MAP:
         return _CIK_MAP
-    url = "https://www.sec.gov/files/company_tickers.json"
-    req = urllib.request.Request(url, headers=SEC_HEADERS)
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json_mod.loads(resp.read())
+    raw = _sec_get("https://www.sec.gov/files/company_tickers.json")
+    if raw is None:
+        return {}
+    try:
+        data = json_mod.loads(raw)
+    except Exception:
+        return {}
     mapping = {}
     for row in data.values():
         ticker = str(row.get("ticker", "")).upper()
@@ -45,9 +58,15 @@ def _load_cik_map():
 
 
 def _sec_get(url):
-    req = urllib.request.Request(url, headers=SEC_HEADERS)
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return resp.read()
+    """Fetch from SEC EDGAR. Returns bytes, or None if EDGAR is unreachable
+    (blocked cloud IP, timeout, error) — callers serve cached data instead of
+    failing. 10s timeout keeps a cold-start request from hanging."""
+    try:
+        req = urllib.request.Request(url, headers=SEC_HEADERS)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.read()
+    except Exception:
+        return None
 
 
 
@@ -105,20 +124,34 @@ def _parse_form4(xml_bytes, cik_int, accession_nodash):
 @router.get("/insider-trades/{ticker}")
 def insider_trades(ticker: str):
     ticker = ticker.upper()
-    try:
-        cik_map = _load_cik_map()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Could not load SEC ticker map: {e}")
+    import time
+    now = time.time()
+    cached = _INSIDER_CACHE.get(ticker)
+    if cached and now - cached[0] < _INSIDER_TTL:
+        return cached[1]
+
+    def _degrade():
+        # EDGAR unreachable: serve stale cache if present, else empty (never 502).
+        return cached[1] if cached else {"ticker": ticker, "trades": []}
+
+    cik_map = _load_cik_map()  # {} if EDGAR unreachable (no raise)
+    if not cik_map:
+        return _degrade()
 
     cik = cik_map.get(ticker)
     if not cik:
-        return {"ticker": ticker, "trades": []}
+        payload = {"ticker": ticker, "trades": []}
+        _INSIDER_CACHE[ticker] = (now, payload)
+        return payload
 
     cik_int = int(cik)
+    sub_raw = _sec_get(f"https://data.sec.gov/submissions/CIK{cik}.json")
+    if sub_raw is None:
+        return _degrade()
     try:
-        sub = json_mod.loads(_sec_get(f"https://data.sec.gov/submissions/CIK{cik}.json"))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Could not fetch SEC submissions: {e}")
+        sub = json_mod.loads(sub_raw)
+    except Exception:
+        return _degrade()
 
     recent = sub.get("filings", {}).get("recent", {})
     forms = recent.get("form", [])
@@ -155,7 +188,9 @@ def insider_trades(ticker: str):
 
     # Sort newest first, cap to a sensible number
     all_trades.sort(key=lambda t: t.get("date") or "", reverse=True)
-    return {"ticker": ticker, "trades": all_trades[:25]}
+    payload = {"ticker": ticker, "trades": all_trades[:25]}
+    _INSIDER_CACHE[ticker] = (now, payload)
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -164,17 +199,29 @@ def insider_trades(ticker: str):
 
 
 def _fund_holdings(cik):
-    """Fetch + parse a fund's most recent 13F-HR info table. Cached per fund."""
+    """Fetch + parse a fund's most recent 13F-HR info table. Cached per fund for
+    7 days. If EDGAR is unreachable, serve the cached copy even if expired (13F
+    data is quarterly, so stale is fine) and never overwrite good data with empty.
+    Result carries `ok`: True if freshly fetched/valid, False if EDGAR was down."""
     import time
     now = time.time()
     cached = _F13_CACHE.get(cik)
     if cached and now - cached[0] < _F13_TTL:
         return cached[1]
 
+    def _stale_or_empty():
+        # EDGAR unreachable: prefer stale cache, else an empty "not ok" result.
+        if cached:
+            return cached[1]
+        return {"holdings": {}, "period": None, "ok": False}
+
     import xml.etree.ElementTree as ET
-    result = {"holdings": {}, "period": None}
+    result = {"holdings": {}, "period": None, "ok": True}
     try:
-        sub = json_mod.loads(_sec_get(f"https://data.sec.gov/submissions/CIK{cik}.json"))
+        raw = _sec_get(f"https://data.sec.gov/submissions/CIK{cik}.json")
+        if raw is None:
+            return _stale_or_empty()  # EDGAR down — keep any prior good data
+        sub = json_mod.loads(raw)
         recent = sub.get("filings", {}).get("recent", {})
         forms = recent.get("form", [])
         accessions = recent.get("accessionNumber", [])
@@ -190,7 +237,10 @@ def _fund_holdings(cik):
         base = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{nodash}"
 
         # Find the information-table XML via the filing's directory index
-        index = json_mod.loads(_sec_get(f"{base}/index.json"))
+        idx_raw = _sec_get(f"{base}/index.json")
+        if idx_raw is None:
+            return _stale_or_empty()
+        index = json_mod.loads(idx_raw)
         names = [it.get("name", "") for it in index.get("directory", {}).get("item", [])]
         xmls = [n for n in names if n.lower().endswith(".xml") and "primary_doc" not in n.lower()]
         info_name = next(
@@ -201,7 +251,10 @@ def _fund_holdings(cik):
             _F13_CACHE[cik] = (now, result)
             return result
 
-        root = ET.fromstring(_sec_get(f"{base}/{info_name}"))
+        xml_raw = _sec_get(f"{base}/{info_name}")
+        if xml_raw is None:
+            return _stale_or_empty()
+        root = ET.fromstring(xml_raw)
         for it in root.iter():
             if _local(it.tag) != "infoTable":
                 continue
@@ -249,13 +302,22 @@ def _company_name_for(ticker):
 @router.get("/institutional-holdings/{ticker}")
 def institutional_holdings(ticker: str):
     ticker = ticker.upper()
+    import time
+    now = time.time()
+    cached = _INST_CACHE.get(ticker)
+    if cached and now - cached[0] < _INST_TTL:
+        return cached[1]
+
     company = _company_name_for(ticker)
     comp_norm = _norm_company(company)
+    edgar = {"ok": False}  # did EDGAR serve any usable data this call?
 
     from concurrent.futures import ThreadPoolExecutor
 
     def check(fund):
         data = _fund_holdings(fund["cik"])
+        if data.get("ok", True):  # fresh/valid (or served from a prior good cache)
+            edgar["ok"] = True
         holdings = data["holdings"]
         match = None
         # 1) Exact normalized match wins (avoids e.g. "APPLE HOSPITALITY REIT"
@@ -280,7 +342,21 @@ def institutional_holdings(ticker: str):
     with ThreadPoolExecutor(max_workers=3) as pool:
         results = list(pool.map(check, LEGENDARY_FUNDS))
 
-    return {"ticker": ticker, "company_name": company, "funds": results}
+    if edgar["ok"]:
+        payload = {"ticker": ticker, "company_name": company, "funds": results}
+        _INST_CACHE[ticker] = (now, payload)
+        return payload
+
+    # EDGAR unreachable for every fund. Prefer stale cache (13F is quarterly, so a
+    # week-old copy is valid); otherwise be honest rather than showing "—" for all.
+    if cached:
+        return cached[1]
+    return {
+        "ticker": ticker,
+        "company_name": company,
+        "funds": [],
+        "status": "temporarily_unavailable",
+    }
 
 
 # ---------------------------------------------------------------------------

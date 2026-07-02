@@ -224,7 +224,7 @@ export default function AnalyzePage({
       {data && !loading && !data.valuation_breakdown && (
         <>
           <div className="flex items-center gap-3 flex-wrap">
-            <h1 className="text-3xl font-bold text-moat-text">{data.company_name}</h1>
+            <h1 className="text-3xl font-bold text-moat-text">{data.company_name || data.ticker}</h1>
             <Badge variant="neutral">{data.ticker}</Badge>
             {/* Asset-class badge applies to genuine ETF/crypto/index, not to an
                 equity that merely fell back to degraded data. */}
@@ -297,7 +297,7 @@ export default function AnalyzePage({
         <>
           <div className="flex items-center gap-3 flex-wrap">
             <h1 className="text-3xl font-bold text-moat-text">
-              {data.company_name}
+              {data.company_name || data.ticker}
             </h1>
             <Badge variant="neutral">{data.ticker}</Badge>
             {hasFV ? (

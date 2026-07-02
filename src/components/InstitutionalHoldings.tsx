@@ -22,6 +22,7 @@ function fmtValue(v: number | null): string {
 
 export function InstitutionalHoldings({ ticker }: { ticker: string }) {
   const [funds, setFunds] = useState<FundHolding[]>([]);
+  const [unavailable, setUnavailable] = useState(false);
   const [loading, setLoading] = useState(true);
   const fetchedTicker = useRef<string | null>(null);
 
@@ -29,10 +30,20 @@ export function InstitutionalHoldings({ ticker }: { ticker: string }) {
     if (fetchedTicker.current === ticker) return;
     fetchedTicker.current = ticker;
     setLoading(true);
+    setUnavailable(false);
     fetch(`${API_BASE_URL}/institutional-holdings/${ticker}`)
       .then((r) => r.json())
-      .then((d) => setFunds(d.funds || []))
-      .catch(() => setFunds([]))
+      .then((d) => {
+        // The backend returns this when SEC EDGAR is unreachable and there's no
+        // cached data — show an honest note instead of "—" for every fund.
+        if (d.status === "temporarily_unavailable") {
+          setUnavailable(true);
+          setFunds([]);
+        } else {
+          setFunds(d.funds || []);
+        }
+      })
+      .catch(() => setUnavailable(true))
       .finally(() => setLoading(false));
   }, [ticker]);
 
@@ -46,6 +57,10 @@ export function InstitutionalHoldings({ ticker }: { ticker: string }) {
         <div className="flex justify-center py-6 text-moat-text-muted animate-pulse">
           Checking fund filings…
         </div>
+      ) : unavailable ? (
+        <p className="py-4 text-center text-sm text-moat-text-muted">
+          Institutional data temporarily unavailable — please check back shortly.
+        </p>
       ) : (
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           {funds.map((f) => (
