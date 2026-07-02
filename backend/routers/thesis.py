@@ -45,6 +45,150 @@ def thesis_endpoint(ticker: str, refresh: bool = False):
     )
 
 
+# ---------------------------------------------------------------------------
+# AI valuation reviewer — a second opinion on the deterministic model.
+#
+# The quantitative engine (DCF + relative multiples) is the auditable anchor, but
+# it can produce unreasonable numbers on edge cases (restructurings, negative or
+# near-zero denominators, unusual capital structures). This reviewer judges the
+# model's output against the fundamentals and, when it disagrees, supplies its own
+# grounded intrinsic-value estimate and confidence. It NEVER pretends to do precise
+# DCF math — it reasons from the provided numbers and is told to prefer an honest
+# "low confidence / wide range" over false precision.
+# ---------------------------------------------------------------------------
+
+VALUATION_REVIEW_SYSTEM = (
+    "You are a senior equity-valuation analyst giving a SECOND OPINION on an "
+    "automated valuation model's output for a single company. You will receive the "
+    "company's fundamentals, the current market price, and the model's intrinsic-"
+    "value estimate (a blend of an internal DCF, an external DCF, and relative "
+    "multiples), plus its scenarios and self-reported confidence.\n\n"
+    "YOUR JOB:\n"
+    "1. Judge whether the model's intrinsic value is REASONABLE given the "
+    "fundamentals and the current price. Watch for red flags: a fair value that is "
+    "wildly above or below the market price with no justification; growth or margin "
+    "assumptions inconsistent with the actual history; multiples distorted by a "
+    "near-zero or negative denominator (EPS/FCF); ignoring losses, heavy debt, "
+    "cyclicality, dilution, or a recent restructuring/merger.\n"
+    "2. If the model looks reasonable, endorse it and state your confidence.\n"
+    "3. If the model looks WRONG, say so plainly and provide YOUR OWN intrinsic-"
+    "value estimate: a single point value AND a low-high range, grounded in the "
+    "provided numbers (e.g. a defensible P/E on normalized earnings, an EV/EBITDA "
+    "or P/FCF on trend cash flow, or book value for asset-heavy/financials). Show "
+    "the reasoning briefly.\n\n"
+    "HARD RULES:\n"
+    "- Reason ONLY from the numbers provided. Do NOT invent financial figures, "
+    "analyst targets, or facts not in the data. If a needed number is missing, say "
+    "so and widen your range.\n"
+    "- Your estimates are informed JUDGEMENT, not precise calculations — never imply "
+    "false precision. When the business is genuinely hard to value (no earnings, "
+    "restructuring, extreme volatility), prefer LOW confidence and a WIDE range over "
+    "a confident single number.\n"
+    "- All monetary values are per-share, in the same currency as current_price.\n"
+    "- Keep the rationale to 2-4 sentences, specific and quantitative.\n\n"
+    "Return ONLY valid JSON with EXACTLY these fields:\n"
+    "{\n"
+    '  "assessment": "reasonable" | "too_high" | "too_low" | "unreliable",\n'
+    '  "agrees_with_model": true | false,\n'
+    '  "ai_fair_value": <number per share, or null if you cannot estimate>,\n'
+    '  "ai_value_low": <number, or null>,\n'
+    '  "ai_value_high": <number, or null>,\n'
+    '  "confidence": "high" | "medium" | "low",\n'
+    '  "rationale": "2-4 sentences explaining your judgement",\n'
+    '  "key_factors": ["short phrase", "short phrase", "short phrase"]\n'
+    "}"
+)
+
+
+@router.get("/valuation-review/{ticker}")
+def valuation_review(ticker: str, refresh: bool = False):
+    ticker = ticker.upper()
+    return _cached_or_generate(
+        f"valreview:{ticker}", THESIS_CACHE_TTL, refresh, lambda: _generate_valuation_review(ticker)
+    )
+
+
+def _generate_valuation_review(ticker: str):
+    # Reuse the already-cached analyze + metrics results (no extra upstream cost).
+    try:
+        a = analyze(ticker)
+    except Exception:
+        a = {}
+    # Only operating companies get a quantitative valuation to review.
+    if not a.get("valuation_breakdown"):
+        payload = {
+            "ticker": ticker,
+            "applicable": False,
+            "note": "Valuation review applies to operating companies only.",
+        }
+        return payload, False  # don't cache a non-applicable stub
+
+    try:
+        m = metrics_endpoint(ticker)
+    except Exception:
+        m = {}
+    iv = a.get("intrinsic_value") or {}
+    vb = a.get("valuation_breakdown") or {}
+    val = (m.get("valuation") or {})
+    qual = (m.get("quality") or {})
+    fh = (m.get("financial_health") or {})
+
+    data = {
+        "company_name": a.get("company_name"),
+        "sector": (a.get("dcf_breakdown") or {}).get("sector"),
+        "currency": a.get("currency"),
+        "current_price": a.get("current_price"),
+        "model_intrinsic_value": iv.get("consensus"),
+        "model_scenarios": {
+            "bear": (iv.get("bear") or {}).get("value"),
+            "base": (iv.get("base") or {}).get("value"),
+            "bull": (iv.get("bull") or {}).get("value"),
+        },
+        "model_confidence": a.get("confidence"),
+        "model_margin_of_safety_pct": a.get("margin_of_safety_pct"),
+        "model_adjustments": vb.get("adjustments_applied"),
+        "valuation_breakdown": {
+            "internal_dcf": vb.get("internal_dcf"),
+            "external_dcf": vb.get("external_dcf"),
+            "relative_value": vb.get("relative_value"),
+            "weights": vb.get("blend_weights"),
+        },
+        "piotroski_f_score_0_to_9": a.get("f_score"),
+        "revenue_last_5y": a.get("revenue_5yr"),
+        "free_cash_flow_last_5y": a.get("fcf_5yr"),
+        "ratios": {
+            "pe": val.get("pe_ratio"),
+            "forward_pe": val.get("forward_pe"),
+            "price_to_book": val.get("pb_ratio"),
+            "ev_ebitda": val.get("ev_ebitda"),
+            "p_fcf": val.get("p_fcf"),
+            "peg": val.get("peg_ratio"),
+            "profit_margin_pct": qual.get("profit_margin"),
+            "roa_pct": qual.get("roic"),
+            "current_ratio": qual.get("current_ratio"),
+            "eps_ttm": fh.get("eps_ttm"),
+            "debt_to_equity": fh.get("debt_equity"),
+            "market_cap": fh.get("market_cap"),
+        },
+    }
+
+    user_prompt = (
+        "Review this valuation. Use ONLY the data below; per-share values are in "
+        f"{data.get('currency') or 'USD'}.\n\n"
+        f"DATA:\n{json_mod.dumps(data, indent=2, default=str)}"
+    )
+    parsed, source = _llm_call(VALUATION_REVIEW_SYSTEM, user_prompt, max_tokens=1200)
+    if not parsed:
+        return {"ticker": ticker, "applicable": True}, False  # allow stale-serve
+
+    parsed["ticker"] = ticker
+    parsed["applicable"] = True
+    parsed["model_intrinsic_value"] = iv.get("consensus")
+    parsed["current_price"] = a.get("current_price")
+    parsed["generated_source"] = source
+    return parsed, True
+
+
 def _generate_thesis(ticker: str):
     try:
         stock = yf.Ticker(ticker)

@@ -12,6 +12,7 @@ import { FinancialTrends } from "@/components/FinancialTrends";
 import { PEChart } from "@/components/PEChart";
 import { KeyMetrics } from "@/components/KeyMetrics";
 import { InvestorCards } from "@/components/InvestorCards";
+import { ValuationReview } from "@/components/ValuationReview";
 import { InsiderTrades } from "@/components/InsiderTrades";
 import { InstitutionalHoldings } from "@/components/InstitutionalHoldings";
 import { PortfolioButton } from "@/components/PortfolioButton";
@@ -445,6 +446,9 @@ export default function AnalyzePage({
               </div>
             </div>
           </Card>
+
+          {/* AI second opinion on the quantitative valuation */}
+          <ValuationReview ticker={data.ticker} />
 
           {/* Legendary Investor Cards */}
           <InvestorCards ticker={data.ticker} />
