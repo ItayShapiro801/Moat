@@ -51,6 +51,59 @@ def _valuation_cache_set(ticker: str, payload: dict) -> None:
     _VALUATION_CACHE[ticker] = (_time.time(), payload)
 
 
+# Short-TTL cache for the supporting data endpoints (/metrics, /financials,
+# /price-history). One analyze page load fetches these from several components at
+# once (e.g. financials is used by both the trends chart and the P/E chart), so
+# without a cache the same upstream call runs many times per page load — slow and
+# a needless drain on the yfinance/FMP rate budget. Only successful full (non-
+# degraded) responses are cached here; the degraded fallback paths keep their own
+# short cache so the app still recovers quickly when a provider comes back.
+_DATA_TTL = 15 * 60  # 15 minutes — intraday-stable data
+_DATA_CACHE: dict[str, tuple] = {}
+
+
+def _data_cache_get(key: str):
+    entry = _DATA_CACHE.get(key)
+    if entry and (_time.time() - entry[0]) < _DATA_TTL:
+        return entry[1]
+    return None
+
+
+def _data_cache_set(key: str, payload) -> None:
+    _DATA_CACHE[key] = (_time.time(), payload)
+
+
+# Per-key locks so a burst of concurrent identical requests (one page load fires
+# several) collapses into ONE upstream fetch — the rest wait and reuse the result
+# instead of all hammering yfinance/FMP at once (which triggers rate-limiting).
+import threading as _threading
+_DATA_LOCKS: dict[str, "_threading.Lock"] = {}
+_DATA_LOCKS_GUARD = _threading.Lock()
+
+
+def _data_lock(key: str):
+    with _DATA_LOCKS_GUARD:
+        lock = _DATA_LOCKS.get(key)
+        if lock is None:
+            lock = _threading.Lock()
+            _DATA_LOCKS[key] = lock
+        return lock
+
+
+def _locked_cache(ckey: str, producer):
+    """Return cached value, or run `producer()` once under a per-key lock so
+    concurrent duplicate requests don't stampede the data provider. The producer
+    is responsible for caching its own successful (non-degraded) result."""
+    cached = _data_cache_get(ckey)
+    if cached is not None:
+        return cached
+    with _data_lock(ckey):
+        cached = _data_cache_get(ckey)  # filled while we waited on the lock
+        if cached is not None:
+            return cached
+        return producer()
+
+
 def _resolve_market_data(ticker: str):
     """Acquire data for the FULL valuation engine, trying providers in order and
     returning (stock_like, info, source). yfinance is tried first for speed/
@@ -294,6 +347,11 @@ def price_history(ticker: str, period: str = "1y"):
     ticker = ticker.upper()
     if period not in VALID_PERIODS:
         period = "1y"
+    ckey = f"price-history:{ticker}:{period}"
+    return _locked_cache(ckey, lambda: _price_history_impl(ticker, period, ckey))
+
+
+def _price_history_impl(ticker: str, period: str, ckey: str):
     stock = yf.Ticker(ticker)
     try:
         hist = stock.history(period=period)
@@ -345,7 +403,9 @@ def price_history(ticker: str, period: str = "1y"):
     except Exception:
         pass
 
-    return {"ticker": ticker, "dates": dates, "prices": prices}
+    result = {"ticker": ticker, "dates": dates, "prices": prices}
+    _data_cache_set(ckey, result)
+    return result
 
 
 
@@ -376,6 +436,11 @@ def fx_rate(base: str = "USD"):
 @router.get("/financials/{ticker}")
 def financials_endpoint(ticker: str):
     ticker = ticker.upper()
+    ckey = f"financials:{ticker}"
+    return _locked_cache(ckey, lambda: _financials_impl(ticker, ckey))
+
+
+def _financials_impl(ticker: str, ckey: str):
     stock = yf.Ticker(ticker)
     try:
         inc = stock.financials
@@ -452,16 +517,23 @@ def financials_endpoint(ticker: str):
             shares.append({"year": str(date.year), "value": float(val)})
         shares.reverse()
 
-    return {
+    result = {
         "ticker": ticker, "revenue": revenue, "eps": eps, "fcf": fcf,
         "gross_profit": gross_profit, "operating_income": operating_income,
         "net_income": net_income, "shares_outstanding": shares,
     }
+    _data_cache_set(ckey, result)
+    return result
 
 
 @router.get("/metrics/{ticker}")
 def metrics_endpoint(ticker: str):
     ticker = ticker.upper()
+    ckey = f"metrics:{ticker}"
+    return _locked_cache(ckey, lambda: _metrics_impl(ticker, ckey))
+
+
+def _metrics_impl(ticker: str, ckey: str):
     stock = yf.Ticker(ticker)
     try:
         info = stock.info or {}
@@ -505,7 +577,7 @@ def metrics_endpoint(ticker: str):
     if peg is None and pe is not None and fg is not None and fg > 0:
         peg = round(pe / (fg * 100), 2)
 
-    return {
+    result = {
         "ticker": ticker,
         "valuation": {
             "pe_ratio": round(pe, 1) if pe is not None else None,
@@ -541,6 +613,8 @@ def metrics_endpoint(ticker: str):
             "target_low_price": g("targetLowPrice"),
         },
     }
+    _data_cache_set(ckey, result)
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -158,12 +158,14 @@ def insider_trades(ticker: str):
     accessions = recent.get("accessionNumber", [])
     primary_docs = recent.get("primaryDocument", [])
 
-    # Collect the most recent Form 4 filings
+    # Collect the most recent Form 4 filings. Each is a separate SEC request, so
+    # 10 (down from 20) roughly halves the cold-fetch time while still surfacing
+    # plenty of recent insider activity; result is cached 6h afterward.
     form4 = []
     for i, f in enumerate(forms):
         if f == "4":
             form4.append((accessions[i], primary_docs[i] if i < len(primary_docs) else ""))
-        if len(form4) >= 20:
+        if len(form4) >= 10:
             break
 
     from concurrent.futures import ThreadPoolExecutor
