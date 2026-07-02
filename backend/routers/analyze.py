@@ -246,11 +246,25 @@ def analyze(ticker: str):
     base_value = scenarios["base"]["value"]
     is_financial = sector in FINANCIAL_SECTORS
 
-    # Consensus = average of [base_dcf, external_dcf (if usable), relative_value]
+    # Consensus = average of [base_dcf, external_dcf (if usable), relative_value].
+    # The internal DCF is only trustworthy when it used a FORWARD growth input.
+    # On the FMP free-tier path there are no forward analyst estimates, so it falls
+    # back to a historical FCF CAGR that badly undervalues growth companies (e.g.
+    # AAPL -> ~$86). In that case, if a forward-looking external DCF exists, drop
+    # the weak internal DCF and defer to the external DCF + relative multiples.
+    dcf_is_forward = str(dcf_result.get("growth_source", "")).startswith("forward")
+    has_external = bool(ext_dcf and ext_dcf > 0)
+    internal_reliable = (
+        base_value and base_value > 0 and not is_financial
+        and (dcf_is_forward or not has_external)
+    )
     consensus_sources = []
-    if base_value and base_value > 0 and not is_financial:
+    if internal_reliable:
         consensus_sources.append(base_value)
-    ext_usable = ext_dcf and ext_dcf > 0 and not blend["source_mismatch_warning"]
+    # Use the external forward DCF unless it mismatches a *reliable* internal DCF
+    # (when the internal one is the unreliable historical-CAGR fallback, the
+    # "mismatch" is the internal's fault, so we still trust the external).
+    ext_usable = has_external and (not blend["source_mismatch_warning"] or not internal_reliable)
     if ext_usable:
         consensus_sources.append(ext_dcf)
     if rel_val and rel_val > 0:

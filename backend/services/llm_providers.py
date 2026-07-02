@@ -156,9 +156,15 @@ def _ask_investor(groq_client, investor, facts_json, stats=None):
 
 
 
+# A hung provider request must never stall an endpoint forever (that leaves the
+# UI card spinning). Cap each attempt; on timeout the chain moves to the next
+# provider, and the endpoint ultimately returns (or stale-serves) rather than hang.
+_LLM_TIMEOUT = 20  # seconds per provider attempt
+
+
 def _provider_groq(system_prompt, user_prompt, max_tokens):
     from groq import Groq
-    client = Groq(api_key=GROQ_API_KEY)
+    client = Groq(api_key=GROQ_API_KEY, timeout=_LLM_TIMEOUT, max_retries=0)
     resp = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
@@ -184,13 +190,14 @@ def _provider_gemini(system_prompt, user_prompt, max_tokens):
             "max_output_tokens": max(max_tokens * 2, 4000),
             "response_mime_type": "application/json",
         },
+        request_options={"timeout": _LLM_TIMEOUT},
     )
     return resp.text
 
 
 def _provider_cerebras(system_prompt, user_prompt, max_tokens):
     from cerebras.cloud.sdk import Cerebras
-    client = Cerebras(api_key=CEREBRAS_API_KEY)
+    client = Cerebras(api_key=CEREBRAS_API_KEY, timeout=_LLM_TIMEOUT, max_retries=0)
     resp = client.chat.completions.create(
         model="llama-3.3-70b",
         messages=[
