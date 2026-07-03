@@ -138,9 +138,13 @@ def forward_growth(ticker: str) -> dict:
     if hit and now - hit[0] < (_GROWTH_TTL if hit[1].get("_hit") else _MISS_TTL):
         return {k: v for k, v in hit[1].items() if k != "_hit"}
     if not BUSINESSQUANT_API_KEYS or not _key_order():
+        print(f"[businessquant] {ticker}: no keys/budget "
+              f"(keys={len(BUSINESSQUANT_API_KEYS)}, usable={len(_key_order())})", flush=True)
         return {"earningsGrowth": None, "revenueGrowth": None}  # no key/budget; don't cache a miss aggressively
     eg = _next_year_growth(ticker, "eps")
     rg = _next_year_growth(ticker, "revenue")
     result = {"earningsGrowth": eg, "revenueGrowth": rg}
+    print(f"[businessquant] {ticker}: eps={eg} rev={rg} "
+          f"(keys={len(BUSINESSQUANT_API_KEYS)}, usable={len(_key_order())})", flush=True)
     _GROWTH_CACHE[ticker] = (now, {**result, "_hit": (eg is not None or rg is not None)})
     return result
