@@ -261,18 +261,25 @@ def _llm_call(system_prompt, user_prompt, max_tokens=900, order=("cerebras", "gr
     is reliably up (3/3). Leading with the working provider means calls succeed
     immediately instead of burning time failing through two dead providers first —
     which was making the single-shot cards (valuation-review) intermittently blank.
-    Groq/Gemini remain as backups for when their daily quotas reset."""
-    for name in order:
-        has_key, fn = _PROVIDERS[name]
-        if not has_key():
-            continue
-        try:
-            text = fn(system_prompt, user_prompt, max_tokens)
-            parsed = _parse_llm_json(text)
-            if parsed is not None:
-                return parsed, name
-        except Exception:
-            continue
+    Groq/Gemini remain as backups for when their daily quotas reset.
+
+    Two passes over the providers: when only one provider is actually up (common on
+    these free tiers), a single transient hiccup on it would otherwise blank the card
+    entirely (cards don't cache failures, so the user sees "Couldn't load" until they
+    reload). A second pass turns a one-off failure into a retry, which makes the
+    first-paint of the cards reliable instead of flaky."""
+    for attempt in range(2):
+        for name in order:
+            has_key, fn = _PROVIDERS[name]
+            if not has_key():
+                continue
+            try:
+                text = fn(system_prompt, user_prompt, max_tokens)
+                parsed = _parse_llm_json(text)
+                if parsed is not None:
+                    return parsed, name
+            except Exception:
+                continue
     return None, None
 
 
