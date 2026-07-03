@@ -20,8 +20,8 @@ from services.dcf import compute_internal_dcf, fetch_external_dcf
 from services.relative_value import detect_reorganization, compute_relative_value
 from services.blend import compute_blended_valuation
 from services import fmp_fallback as fmp
-from services import finnhub_fallback as finnhub
 from services.fmp_fallback import is_rate_limited, log_source, build_fmp_bundle
+from services.edgar_fundamentals import build_edgar_bundle
 
 router = APIRouter()
 
@@ -127,12 +127,22 @@ def _resolve_market_data(ticker: str):
             return stock, info, "yfinance"
     except Exception:
         pass
-    # 2. FMP — official API, full valuation pipeline via the adapter.
+    # 2. SEC EDGAR — free, uncapped statements for US filers (companyfacts). Tried
+    #    before FMP because it doesn't burn the limited FMP daily budget (it needs
+    #    only ~1 FMP call for historical prices vs ~8 for the full FMP bundle).
+    try:
+        bundle = build_edgar_bundle(ticker)
+        if bundle is not None:
+            stock, info = bundle
+            return stock, info, "edgar"
+    except Exception:
+        pass
+    # 3. FMP — official API, full valuation for non-US names EDGAR can't cover.
     bundle = build_fmp_bundle(ticker)
     if bundle is not None:
         stock, info = bundle
         return stock, info, "fmp"
-    # 3. No full-data provider; caller handles degraded quote-only path.
+    # 4. No full-data provider; caller handles degraded quote-only path.
     return None, None, None
 
 @router.get("/analyze/{ticker}")
@@ -155,14 +165,11 @@ def analyze(ticker: str):
         if stale is not None:
             log_source("analyze", ticker, "stale_cache")
             return stale
-        for fb_fn, src in (
-            (fmp.analyze_fallback, "fmp_fallback"),
-            (finnhub.analyze_fallback, "finnhub_fallback"),
-        ):
-            fb = fb_fn(ticker)
-            if fb is not None:
-                log_source("analyze", ticker, src)
-                return fb
+        # FMP is the sole fallback provider (it rotates across the configured keys).
+        fb = fmp.analyze_fallback(ticker)
+        if fb is not None:
+            log_source("analyze", ticker, "fmp_fallback")
+            return fb
         raise HTTPException(status_code=503, detail=f"Data temporarily unavailable for {ticker}.")
 
     log_source("analyze", ticker, source)
@@ -387,14 +394,10 @@ def _price_history_impl(ticker: str, period: str, ckey: str):
         hist = None  # rate-limit or transient error -> try fallback below
 
     if hist is None or hist.empty:
-        for fb_fn, src in (
-            (fmp.price_history_fallback, "fmp_fallback"),
-            (finnhub.price_history_fallback, "finnhub_fallback"),
-        ):
-            fb = fb_fn(ticker, period)
-            if fb is not None:
-                log_source("price-history", ticker, src)
-                return fb
+        fb = fmp.price_history_fallback(ticker, period)
+        if fb is not None:
+            log_source("price-history", ticker, "fmp_fallback")
+            return fb
         raise HTTPException(status_code=404, detail=f"No price history for {ticker}")
     log_source("price-history", ticker, "yfinance")
     # yfinance can return NaN/Inf closes for some dates (gaps, partial data).
@@ -477,16 +480,13 @@ def _financials_impl(ticker: str, ckey: str):
     except Exception:
         inc = cf = bs = None
 
-    # Empty income statement is the rate-limit symptom; try FMP then Finnhub.
+    # Empty income statement is the rate-limit symptom; try the FMP fallback
+    # (which rotates across the configured keys). No Finnhub tier.
     if inc is None or getattr(inc, "empty", True):
-        for fb_fn, src in (
-            (fmp.financials_fallback, "fmp_fallback"),
-            (finnhub.financials_fallback, "finnhub_fallback"),
-        ):
-            fb = fb_fn(ticker)
-            if fb is not None:
-                log_source("financials", ticker, src)
-                return fb
+        fb = fmp.financials_fallback(ticker)
+        if fb is not None:
+            log_source("financials", ticker, "fmp_fallback")
+            return fb
         # No fallback data: fall through with empty frames -> empty arrays (prior behavior).
         import pandas as pd
         inc = inc if inc is not None else pd.DataFrame()
@@ -568,17 +568,14 @@ def _metrics_impl(ticker: str, ckey: str):
     except Exception:
         info = {}
 
-    # Empty info (no market cap / price) is the rate-limit symptom; try FMP then Finnhub.
+    # Empty info (no market cap / price) is the rate-limit symptom; try the FMP
+    # fallback (rotates across the configured keys). No Finnhub tier.
     if not info or (info.get("marketCap") is None and info.get("currentPrice") is None
                     and info.get("regularMarketPrice") is None):
-        for fb_fn, src in (
-            (fmp.metrics_fallback, "fmp_fallback"),
-            (finnhub.metrics_fallback, "finnhub_fallback"),
-        ):
-            fb = fb_fn(ticker)
-            if fb is not None:
-                log_source("metrics", ticker, src)
-                return fb
+        fb = fmp.metrics_fallback(ticker)
+        if fb is not None:
+            log_source("metrics", ticker, "fmp_fallback")
+            return fb
     else:
         log_source("metrics", ticker, "yfinance")
 
