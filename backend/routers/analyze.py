@@ -227,7 +227,7 @@ def analyze(ticker: str):
     fcf_5yr = [int(v) for v in fcf_5yr_raw][::-1] if fcf_5yr_raw else []
 
     # 1. Internal DCF
-    dcf_result = compute_internal_dcf(info, fcf_5yr, sector)
+    dcf_result = compute_internal_dcf(info, fcf_5yr, sector, revenue_5yr)
 
     # 2. External DCF
     ext_dcf = fetch_external_dcf(ticker)
@@ -254,16 +254,21 @@ def analyze(ticker: str):
     is_financial = sector in FINANCIAL_SECTORS
 
     # Consensus = average of [base_dcf, external_dcf (if usable), relative_value].
-    # The internal DCF is only trustworthy when it used a FORWARD growth input.
-    # On the FMP free-tier path there are no forward analyst estimates, so it falls
-    # back to a historical FCF CAGR that badly undervalues growth companies (e.g.
-    # AAPL -> ~$86). In that case, if a forward-looking external DCF exists, drop
-    # the weak internal DCF and defer to the external DCF + relative multiples.
-    dcf_is_forward = str(dcf_result.get("growth_source", "")).startswith("forward")
+    # How much we trust the INTERNAL DCF depends on its growth input:
+    #   - forward_* (analyst estimates)     -> reliable; always include.
+    #   - historical_revenue_cagr           -> reliable enough; include even when an
+    #     external DCF exists (it uses the business's revenue trajectory + a
+    #     capex-normalized base FCF, so it no longer collapses for growth names).
+    #   - historical_cagr (raw FCF CAGR)    -> weak; keep the prior behavior of
+    #     deferring to a forward-looking external DCF when one is available, since
+    #     FCF CAGR badly undervalues companies mid capex-cycle.
+    growth_source = str(dcf_result.get("growth_source", ""))
+    dcf_is_forward = growth_source.startswith("forward")
+    dcf_is_business = dcf_is_forward or growth_source == "historical_revenue_cagr"
     has_external = bool(ext_dcf and ext_dcf > 0)
     internal_reliable = (
         base_value and base_value > 0 and not is_financial
-        and (dcf_is_forward or not has_external)
+        and (dcf_is_business or not has_external)
     )
     consensus_sources = []
     if internal_reliable:
@@ -289,6 +294,33 @@ def analyze(ticker: str):
         # Confidence cannot be high when DCF is entirely unavailable
         if blend["confidence"] == "high":
             blend["confidence"] = "medium"
+
+    # Confidence cannot be high when the ONLY valuation input is the weakest growth
+    # signal — a raw historical FCF CAGR (no forward estimate, no revenue trajectory)
+    # — AND there's no external DCF or relative multiple to cross-check it. That
+    # combination is where the internal DCF is least reliable, so cap it at "low".
+    only_weak_growth = (
+        growth_source == "historical_cagr"
+        and not has_external
+        and not (rel_val and rel_val > 0)
+    )
+    if only_weak_growth and blend["confidence"] in ("high", "medium"):
+        blend["confidence"] = "low"
+
+    # Structural guard for FCF-DCF blind spots. When the internal DCF is the SOLE
+    # input (no external DCF, no relative multiples to cross-check) and it lands
+    # wildly away from the market price, the DCF is almost certainly the wrong lens
+    # for this company — e.g. hyper-capex names (AMZN, TSLA) whose reported free
+    # cash flow is thin/volatile relative to their earning power, yielding an
+    # absurd per-share value (AMZN -> ~$13, TSLA -> ~$31). We can't silently show a
+    # confident 95%-downside number, so cap confidence at "low" and let the AI
+    # reviewer's second opinion carry the nuance. The band (0.4x–2.5x price) is wide
+    # enough that ordinary under/over-valuation still reads as medium/high.
+    internal_only = not has_external and not (rel_val and rel_val > 0)
+    if (internal_only and consensus and current_price
+            and (consensus < 0.4 * current_price or consensus > 2.5 * current_price)
+            and blend["confidence"] in ("high", "medium")):
+        blend["confidence"] = "low"
 
     # Margin of safety anchored to the consensus (Intrinsic Value), which is the
     # single headline number shown in the UI.

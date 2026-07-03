@@ -30,14 +30,46 @@ def _run_dcf(base_fcf, growth_rate, wacc, tgr, net_debt, shares):
     return fv, ev, eq
 
 
-def compute_internal_dcf(info, fcf_5yr, sector):
+def _normalize_base_fcf(latest_fcf, fcf_5yr, revenue_5yr):
+    """Smooth a capex-depressed latest FCF toward the company's typical FCF margin.
+
+    Uses the MEDIAN free-cash-flow margin (FCF/revenue) across the window applied to
+    the latest revenue as a "normalized" base FCF, then returns the larger of that
+    and the raw latest FCF. This lifts a base that's temporarily crushed by an
+    abnormal capex year toward the historical norm, but never drags a healthy base
+    down. Requires aligned positive revenue; otherwise returns the raw latest FCF."""
+    if not revenue_5yr or not fcf_5yr:
+        return latest_fcf
+    n = min(len(revenue_5yr), len(fcf_5yr))
+    if n < 3:
+        return latest_fcf
+    rev = revenue_5yr[-n:]
+    fcf = fcf_5yr[-n:]
+    margins = [f / r for f, r in zip(fcf, rev) if r and r > 0]
+    if len(margins) < 3:
+        return latest_fcf
+    latest_rev = rev[-1]
+    if not latest_rev or latest_rev <= 0:
+        return latest_fcf
+    normalized = statistics.median(margins) * latest_rev
+    # Only normalize UPWARD (recover a depressed base); never inflate a strong one.
+    return max(latest_fcf, normalized) if normalized > 0 else latest_fcf
+
+
+def compute_internal_dcf(info, fcf_5yr, sector, revenue_5yr=None):
     beta = safe_get(info, "beta", 1.0)
     shares = safe_get(info, "sharesOutstanding", 0)
     total_debt = safe_get(info, "totalDebt", 0)
     cash_val = safe_get(info, "totalCash", 0)
     net_debt = total_debt - cash_val
 
-    # Base growth rate
+    # Base growth rate.
+    # Order of trust: forward analyst estimates (best) -> historical growth of the
+    # BUSINESS (revenue, then net income) -> historical growth of FCF (worst).
+    # We avoid leaning on FCF CAGR because free cash flow is distorted by the capex
+    # cycle: a company mid-buildout (e.g. hyperscaler datacenters) shows near-zero or
+    # negative FCF growth even while revenue/earnings compound double digits, which
+    # made the DCF absurdly undervalue such names (GOOGL -> ~$74, AAPL -> ~$86).
     fwd_earn = safe_get(info, "earningsGrowth")
     fwd_rev = safe_get(info, "revenueGrowth")
     growth_source = "historical_cagr"
@@ -47,6 +79,11 @@ def compute_internal_dcf(info, fcf_5yr, sector):
     elif fwd_rev is not None and fwd_rev != 0:
         base_growth = fwd_rev
         growth_source = "forward_revenue"
+    elif revenue_5yr and len(revenue_5yr) >= 3 and all(v > 0 for v in revenue_5yr[-3:]):
+        # No forward estimate: use the revenue trajectory (the cleanest available
+        # signal of the underlying business), not the capex-distorted FCF trajectory.
+        base_growth = compute_cagr(revenue_5yr)
+        growth_source = "historical_revenue_cagr"
     else:
         last_3 = fcf_5yr[-3:] if len(fcf_5yr) >= 3 else fcf_5yr
         base_growth = compute_cagr(last_3)
@@ -60,7 +97,14 @@ def compute_internal_dcf(info, fcf_5yr, sector):
     high_growth = {"Technology", "Communication Services", "Healthcare"}
     tgr = 0.035 if sector in high_growth else 0.025
 
+    # Base FCF, normalized for the capex cycle. The latest year's FCF can be
+    # temporarily depressed by a capex surge (datacenter buildout, a new plant). If
+    # we have revenue, anchor the base to the company's typical FCF *margin* (median
+    # FCF/revenue over the window) applied to the latest revenue, so one abnormal
+    # capex year doesn't set the entire terminal value. Only smooths UPWARD toward
+    # the historical norm (never inflates above it); falls back to raw latest FCF.
     base_fcf = fcf_5yr[-1] if fcf_5yr else 0
+    base_fcf = _normalize_base_fcf(base_fcf, fcf_5yr, revenue_5yr)
 
     # Three scenarios: same data, different growth/discount assumptions
     scenarios_params = {

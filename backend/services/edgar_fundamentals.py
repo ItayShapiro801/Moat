@@ -57,7 +57,15 @@ _CASHFLOW = {
         "NetCashProvidedByUsedInOperatingActivities",
         "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
     ], "dur"),
-    "Capital Expenditure": (["PaymentsToAcquirePropertyPlantAndEquipment"], "dur"),
+    # Capex tag varies by company: most use PP&E, but e.g. Visa files under
+    # PaymentsToAcquireProductiveAssets. Merged across candidates by _pick so the
+    # FCF (and thus the DCF) computes for the widest set of filers.
+    "Capital Expenditure": ([
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsToAcquireProductiveAssets",
+        "PaymentsToAcquirePropertyPlantAndEquipmentAndIntangibleAssets",
+        "PaymentsForCapitalImprovements",
+    ], "dur"),
 }
 _BALANCE = {
     "Total Assets": (["Assets"], "inst"),
@@ -122,12 +130,22 @@ def _annual_series(node, kind):
 
 
 def _pick(gaap, dei, tags, kind):
-    for t in tags:
+    """Merge the candidate tags into one {end_date: value} series.
+
+    A single company often switches the XBRL tag it uses between years (e.g. GOOGL
+    files revenue under `RevenueFromContractWithCustomerExcludingAssessedTax` through
+    2024 but `Revenues` for 2025). Picking one tag wholesale would drop the years the
+    others cover and leave holes (a missing latest year silently corrupts the growth
+    calc). So we overlay all candidates, letting HIGHER-priority tags win a period
+    where several report it, while LOWER-priority tags fill the periods the top tag
+    is missing. Result: the most complete series across every year."""
+    merged = {}
+    for t in reversed(tags):  # apply lowest priority first so higher ones overwrite
         node = gaap.get(t) or dei.get(t)
         s = _annual_series(node, kind)
         if s:
-            return s
-    return {}
+            merged.update(s)
+    return merged
 
 
 def _get_facts(ticker: str):
@@ -196,13 +214,19 @@ def build_edgar_bundle(ticker: str):
     balance_sheet.loc["Share Issued"] = [_num(series["_shares"].get(e)) for e in year_ends]
 
     # --- Market data (EDGAR has none): current price + sector/name + history ---
-    price, sector, name, beta = _market_context(ticker)
+    price, sector, name, beta, mkt_shares = _market_context(ticker)
     if price is None:
         return None  # can't value without a current price
     name = facts_bundle.get("name") or name or ticker
 
     latest = year_ends[0]
-    shares = series["_shares"].get(latest) or None
+    # Prefer the XBRL weighted-average diluted count; fall back to the market
+    # provider's share count for filers whose share tag we can't resolve (e.g. Visa's
+    # multi-class structure), so per-share values (DCF, EPS) don't collapse to zero.
+    shares = series["_shares"].get(latest) or mkt_shares or None
+    if not series["_shares"].get(latest) and mkt_shares:
+        # Backfill the balance-sheet share row too, so anything reading it is consistent.
+        balance_sheet.loc["Share Issued"] = [mkt_shares for _ in year_ends]
     equity = series["Stockholders Equity"].get(latest)
     ltd = series["Long Term Debt"].get(latest) or 0
     cash = series["_cash"].get(latest) or 0
@@ -249,22 +273,69 @@ def build_edgar_bundle(ticker: str):
     return stock, info
 
 
+# Finnhub's `finnhubIndustry` uses its own taxonomy; the valuation engine keys off
+# yfinance/GICS sector names (e.g. the DCF's high-growth terminal bucket
+# {Technology, Communication Services, Healthcare} and FINANCIAL_SECTORS). Map the
+# common Finnhub industries onto those names so, e.g., Alphabet ("Media") lands in
+# Communication Services rather than defaulting to the low-growth bucket.
+_FINNHUB_SECTOR_MAP = {
+    "Media": "Communication Services",
+    "Communication Services": "Communication Services",
+    "Telecommunication": "Communication Services",
+    "Technology": "Technology",
+    "Semiconductors": "Technology",
+    "Health Care": "Healthcare",
+    "Healthcare": "Healthcare",
+    "Pharmaceuticals": "Healthcare",
+    "Biotechnology": "Healthcare",
+    "Life Sciences Tools & Services": "Healthcare",
+    "Banking": "Financial Services",
+    "Financial Services": "Financial Services",
+    "Insurance": "Insurance",
+    "Retail": "Consumer Cyclical",
+    "Automobiles": "Consumer Cyclical",
+    "Consumer products": "Consumer Defensive",
+    "Beverages": "Consumer Defensive",
+    "Food Products": "Consumer Defensive",
+    "Energy": "Energy",
+    "Oil & Gas": "Energy",
+    "Utilities": "Utilities",
+    "Industrial Conglomerates": "Industrials",
+    "Machinery": "Industrials",
+    "Real Estate": "Real Estate",
+    "Basic Materials": "Basic Materials",
+    "Chemicals": "Basic Materials",
+}
+
+
+def _map_sector(finnhub_industry):
+    """Translate a Finnhub industry string to the engine's GICS-style sector name."""
+    if not finnhub_industry:
+        return None
+    return _FINNHUB_SECTOR_MAP.get(finnhub_industry, finnhub_industry)
+
+
 def _market_context(ticker: str):
-    """(current_price, sector, name, beta) for an EDGAR filer.
+    """(current_price, sector, name, beta, shares) for an EDGAR filer.
 
     The current PRICE is the one hard requirement (no price -> no valuation), and it
     must survive the FMP daily cap — the whole point of the EDGAR path. So price comes
     from Finnhub FIRST (free, 60/min, uncapped, never IP-blocked), which also yields
-    sector/name/beta. FMP quote is only a last-resort price backup (rotates across the
-    configured keys). Finnhub is used *solely* for market data here, never statements."""
-    price = sector = name = beta = None
+    sector/name/beta/shares. FMP quote is only a last-resort price backup (rotates
+    across the configured keys). Finnhub is used *solely* for market data here, never
+    statements. `shares` is a fallback for the handful of filers whose XBRL weighted-
+    average diluted share count isn't in a standard tag (e.g. Visa, multi-class)."""
+    price = sector = name = beta = shares = None
     try:
         from services import finnhub_fallback as FH
         price = FH._quote_price(ticker)
         prof = FH._get(f"stock/profile2?symbol={ticker}")
         if isinstance(prof, dict):
-            sector = prof.get("finnhubIndustry")
+            sector = _map_sector(prof.get("finnhubIndustry"))
             name = prof.get("name")
+            # Finnhub reports shareOutstanding in MILLIONS.
+            so = _num(prof.get("shareOutstanding"))
+            shares = so * 1e6 if so else None
         met = FH._get(f"stock/metric?symbol={ticker}&metric=all")
         if isinstance(met, dict):
             beta = _num((met.get("metric") or {}).get("beta"))
@@ -275,7 +346,8 @@ def _market_context(ticker: str):
         q = _first(_fmp_get(f"quote?symbol={ticker}")) or {}
         price = _num(q.get("price"))
         name = name or q.get("name")
-    return price, sector, name, beta
+        shares = shares or _num(q.get("sharesOutstanding"))
+    return price, sector, name, beta, shares
 
 
 def _historical_prices(ticker: str):
