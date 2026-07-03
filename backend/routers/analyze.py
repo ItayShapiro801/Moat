@@ -378,19 +378,26 @@ def analyze(ticker: str):
     if only_weak_growth and blend["confidence"] in ("high", "medium"):
         blend["confidence"] = "low"
 
-    # Structural guard for FCF-DCF blind spots. When the internal DCF is the SOLE
-    # input (no external DCF, no relative multiples to cross-check) and it lands
-    # wildly away from the market price, the DCF is almost certainly the wrong lens
-    # for this company — e.g. hyper-capex names (AMZN, TSLA) whose reported free
-    # cash flow is thin/volatile relative to their earning power, yielding an
-    # absurd per-share value (AMZN -> ~$13, TSLA -> ~$31). We can't silently show a
-    # confident 95%-downside number, so cap confidence at "low" and let the AI
-    # reviewer's second opinion carry the nuance. The band (0.4x–2.5x price) is wide
-    # enough that ordinary under/over-valuation still reads as medium/high.
+    # Structural guard for FCF-DCF blind spots. Hyper-capex names (AMZN, TSLA) have
+    # free cash flow that's thin/volatile relative to their earning power, so the
+    # DCF produces an absurd per-share value (AMZN base ~ $25 vs a $242 price). The
+    # earnings-multiple anchor can then pull the BLENDED consensus back into a
+    # plausible-looking range (~$127) while the underlying DCF is still nonsense —
+    # so keying the guard off the consensus alone misses it. Instead we also look at
+    # the internal DCF's own base scenario: if it lands wildly away from price
+    # (<0.5x or >2x), the DCF is the wrong lens here and confidence can't be high,
+    # regardless of what the anchor did to the blend. (Financials legitimately have
+    # no DCF, so they're exempt — their earnings anchor stands on its own.)
+    dcf_absurd = (
+        not is_financial and base_value and current_price
+        and (base_value < 0.5 * current_price or base_value > 2.0 * current_price)
+    )
     internal_only = not has_external and not (rel_val and rel_val > 0)
-    if (internal_only and consensus and current_price
-            and (consensus < 0.4 * current_price or consensus > 2.5 * current_price)
-            and blend["confidence"] in ("high", "medium")):
+    consensus_absurd = (
+        internal_only and consensus and current_price
+        and (consensus < 0.4 * current_price or consensus > 2.5 * current_price)
+    )
+    if (dcf_absurd or consensus_absurd) and blend["confidence"] in ("high", "medium"):
         blend["confidence"] = "low"
 
     # Margin of safety anchored to the consensus (Intrinsic Value), which is the
