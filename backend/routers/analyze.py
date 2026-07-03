@@ -459,6 +459,18 @@ def analyze(ticker: str):
         # When yfinance served this, the field is absent (matches prior behavior);
         # for FMP-sourced full valuations it records the primary source.
         **({"data_source": source} if source != "yfinance" else {}),
+        # Backup mode: EDGAR+Finnhub only runs once the FMP daily budget is spent.
+        # It's a good estimate but lacks analyst forward estimates, so flag it so the
+        # UI can be honest ("live data limit reached — estimate from SEC filings")
+        # rather than presenting a backup number as if it were the primary feed.
+        **({
+            "data_limited": True,
+            "data_limited_note": (
+                "Live market-data limit reached for today. This estimate is built "
+                "from SEC filings (EDGAR) and may be less precise than usual — it "
+                "lacks analyst forward estimates. Full data resumes tomorrow."
+            ),
+        } if source == "edgar" else {}),
     }
     # Cache full valuations (Part 4) regardless of source. Degraded responses
     # (handled above) are never cached, so the app recovers full data promptly.

@@ -45,6 +45,11 @@ interface AnalysisData {
   // Present only when the backend served degraded data via the FMP fallback
   // (yfinance rate-limited). In that mode valuation fields are legitimately null.
   data_source?: string | null;
+  // Set when the primary (FMP) data budget is spent and the valuation came from
+  // the free SEC-EDGAR + Finnhub backup — a good estimate, but flagged so the UI
+  // is honest that live data is temporarily limited.
+  data_limited?: boolean;
+  data_limited_note?: string | null;
   intrinsic_value: {
     bear: Scenario;
     base: Scenario;
@@ -296,6 +301,15 @@ export default function AnalyzePage({
 
       {data && !loading && data.valuation_breakdown && (
         <>
+          {data.data_limited && (
+            <div className="flex items-start gap-3 rounded-lg border border-moat-warning/40 bg-moat-warning/10 px-4 py-3">
+              <span className="text-moat-warning text-lg leading-none mt-0.5">⚠</span>
+              <p className="text-sm text-moat-text-muted">
+                {data.data_limited_note ||
+                  "Live market-data limit reached for today. This estimate is built from SEC filings and may be less precise than usual. Full data resumes tomorrow."}
+              </p>
+            </div>
+          )}
           <div className="flex items-center gap-3 flex-wrap">
             <h1 className="text-3xl font-bold text-moat-text">
               {data.company_name || data.ticker}
