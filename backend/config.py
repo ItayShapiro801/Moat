@@ -7,9 +7,12 @@ FMP_API_KEY = os.getenv("FMP_API_KEY", "")
 # account). The backend rotates through them, moving to the next only when one is
 # rate-limited. Set FMP_API_KEY plus optional FMP_API_KEY_2 / FMP_API_KEY_3 in
 # the host env. Order is preserved; blanks are ignored.
+# Accept FMP_API_KEY or FMP_API_KEY_1 for the first key — both names appear across
+# environments (e.g. Render was set to FMP_API_KEY_1), and a mismatch silently
+# dropped a whole key (250/day). Reading both makes the config robust to either.
 FMP_API_KEYS = [
     k for k in (
-        FMP_API_KEY,
+        FMP_API_KEY or os.getenv("FMP_API_KEY_1", ""),
         os.getenv("FMP_API_KEY_2", ""),
         os.getenv("FMP_API_KEY_3", ""),
     ) if k
@@ -21,6 +24,23 @@ CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
 # Third-tier market-data provider (60 req/min free). Resilience when both
 # yfinance and FMP are unavailable. Optional; degrades gracefully if unset.
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
+
+# BusinessQuant — the ONLY free source of analyst FORWARD estimates (forward
+# revenue/EPS consensus), the one input EDGAR/Finnhub can't provide. Free tier is
+# 30 calls/day PER KEY, so several free accounts are rotated (like FMP). When all
+# keys are spent the DCF falls back to the Finnhub historical-growth proxy, so
+# valuations never break — they're just slightly less precise. Order preserved;
+# blanks ignored. Set BUSINESSQUANT_API_KEY plus optional _2 ... _6 in the host env.
+BUSINESSQUANT_API_KEYS = [
+    k for k in (
+        os.getenv("BUSINESSQUANT_API_KEY", ""),
+        os.getenv("BUSINESSQUANT_API_KEY_2", ""),
+        os.getenv("BUSINESSQUANT_API_KEY_3", ""),
+        os.getenv("BUSINESSQUANT_API_KEY_4", ""),
+        os.getenv("BUSINESSQUANT_API_KEY_5", ""),
+        os.getenv("BUSINESSQUANT_API_KEY_6", ""),
+    ) if k
+]
 
 # Comma-separated list of browser origins allowed by CORS. Defaults to the local
 # dev frontend; in production set CORS_ALLOWED_ORIGINS to the deployed site URL(s).

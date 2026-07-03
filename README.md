@@ -168,35 +168,49 @@ range, a confidence level, and a short rationale.
 
 ### 2. Data aggregation layer (`backend/routers/`)
 
-- **Three-provider data chain with automatic failover.** `yfinance` is an
-  unofficial scraper whose requests get blocked from cloud IPs unpredictably, so it
-  is treated as opportunistic rather than authoritative. The resolver
-  (`routers/analyze.py` → `_resolve_market_data`) tries providers in order and the
-  full valuation engine runs on whichever succeeds:
-  1. **`yfinance`** — tried first for speed/freshness when the host IP isn't blocked.
-  2. **Financial Modeling Prep (PRIMARY)** — an official API. When yfinance is
-     blocked or empty, `services/fmp_fallback.py` builds a yfinance-shaped adapter
-     (an `info` dict + `financials`/`balance_sheet`/`cashflow`/`quarterly_balance_sheet`
-     DataFrames + `history()`) from FMP's statement endpoints, so the **entire** DCF /
-     F-Score / relative-value / merger-guard pipeline runs unchanged on FMP data —
-     a full valuation, not a degraded response.
-  3. **Finnhub (last resort)** — `services/finnhub_fallback.py`. If both yfinance and
-     FMP are unavailable, Finnhub (60 req/min free) provides at least basic
-     quote/metric data. Its free fundamentals coverage is thinner, so this tier is
-     intentionally degraded (price/name/sector with null valuation).
-  Combining a daily-capped provider (FMP, 250/day) with a per-minute-capped one
-  (Finnhub) yields more combined headroom than either alone. Unavailable fields
-  return `null` rather than crashing; every request logs its source
-  (`yfinance` | `fmp` | `fmp_fallback` | `finnhub_fallback`).
-- **Full-valuation cache + stale-serve** (`routers/analyze.py`). Because FMP is now
-  the primary source (not a rare fallback), a successful full valuation is cached per
-  ticker for **24 h** regardless of which provider produced it, to stay within FMP's
-  250/day budget. A cold `/analyze` costs ~8 FMP calls; a cache hit costs zero. When
-  every provider is exhausted, analyze **serves the last good full valuation (any
-  age)** rather than degrading — a day-old full analysis beats "limited data mode".
-  Only when a ticker has *never* been fetched does it fall back to a quote-only
-  response, which is never cached so the app recovers full data as soon as a provider
-  does.
+- **Mixed free-source data strategy — each provider for what it's best at.** The
+  root constraint: the best single source (`yfinance`) is IP-blocked from cloud
+  hosts, and every affordable API is daily-capped. So instead of one "primary,"
+  the engine assembles a valuation from the source that's strongest (and cheapest)
+  for each *piece*, with an always-on uncapped floor so the site never fully breaks.
+  The resolver (`routers/analyze.py` → `_resolve_market_data`) yields a
+  yfinance-shaped adapter so the **entire** DCF / F-Score / relative-value /
+  merger-guard pipeline runs unchanged on whatever data was assembled.
+
+  | Piece | Source | Cap | Role |
+  |-------|--------|-----|------|
+  | Financial statements | **SEC EDGAR** (`services/edgar_fundamentals.py`) | none | Uncapped floor — straight from filings, never IP-blocked |
+  | Price / multiples / sector | **Finnhub** | 60/min | Uncapped floor for market data |
+  | Forward analyst estimates | **BusinessQuant** (`services/businessquant.py`) | 30/day per key | The one input the others lack; free-account keys rotated |
+  | Full-bundle convenience + external DCF | **Financial Modeling Prep** | 750/day (3 keys) | Nice-to-have while budget lasts |
+  | Opportunistic fresh data | **yfinance** | blocked on cloud | Used first *only* when the host IP isn't blocked |
+
+  Resolver order is `yfinance → FMP → (EDGAR + Finnhub)`. FMP is tried while it has
+  budget (one call bundles everything); once its keys are spent the request falls to
+  the **EDGAR + Finnhub** combo, which is uncapped and always available — so a stock
+  is *always* valuable, at any time, for free.
+- **Source-independent forward growth** (`enrich_growth`). A DCF's growth rate is its
+  most important input, and only *forward* analyst estimates get it right. yfinance
+  supplies them; FMP's free tier does not. So growth is backfilled for any source
+  that lacks it, best-to-good: **(1)** the source's own estimate (yfinance) →
+  **(2)** BusinessQuant's real next-year analyst consensus (free, 30/day per key,
+  rotated across accounts — 6 keys ≈ 90 stocks/day) → **(3)** a Finnhub
+  historical-growth **proxy** (uncapped). The proxy guarantees growth is always
+  populated; without it the DCF collapses to a weak historical FCF CAGR that badly
+  undervalues growth names (AAPL → ~$124). An earnings-multiple anchor
+  (`compute_earnings_multiple_value`) additionally rescues hyper-capex names
+  (AMZN/TSLA) whose free cash flow is too thin for a DCF.
+- **Honest "data limit reached" banner.** When a valuation comes from the EDGAR
+  backup (FMP budget spent), the payload carries `data_limited` and the UI shows a
+  clear notice that the estimate is from SEC filings and may be less precise — a
+  backup number is never dressed up as the primary feed.
+- **Full-valuation cache + stale-serve** (`routers/analyze.py`). A successful full
+  valuation is cached per ticker for **24 h** regardless of source (statements barely
+  move intraday and are what drains the capped budgets); a cache **hit re-fetches
+  only the live price** so the headline quote is never stale. When every provider is
+  exhausted, analyze **serves the last good full valuation (any age)** rather than
+  degrading — a day-old full analysis beats "limited data mode". Only a ticker that
+  has *never* been fetched falls back to a quote-only response.
 - **Supporting-data cache + stampede lock** (`/metrics`, `/financials`,
   `/price-history`). One page load fetches these from several components at once, so
   they carry a 15-minute cache and a per-key lock that collapses a burst of identical

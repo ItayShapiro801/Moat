@@ -333,17 +333,37 @@ def _finnhub_metric(ticker: str) -> dict:
 
 
 def enrich_growth(ticker: str, info: dict) -> None:
-    """Fill in forward-ish growth on `info` IN PLACE when the data source didn't
-    provide it. yfinance gives real analyst growth; FMP's free tier does NOT (leaves
-    earningsGrowth/revenueGrowth None), which made the DCF fall back to a weak
-    historical CAGR and undervalue growth names (AAPL -> ~$124). Finnhub's free,
-    uncapped stock/metric supplies a historical-growth proxy, so we backfill it for
-    ANY source that's missing it — making valuation quality independent of which
-    provider served the statements. Only fills gaps; never overrides real estimates."""
+    """Fill in forward growth on `info` IN PLACE when the data source didn't provide
+    it, so DCF quality is independent of which provider served the statements.
+
+    Precedence, best -> good-enough:
+      1. Source already supplied it (yfinance's analyst growth) -> leave untouched.
+      2. BusinessQuant next-year analyst consensus (real forward estimates, free but
+         30/day per key -> rotated). This is the ideal input.
+      3. Finnhub historical-growth PROXY (free, uncapped) -> used when BQ has no
+         coverage or all its keys are spent, so growth is always populated.
+
+    Without any forward-ish growth the DCF falls back to a weak historical CAGR that
+    undervalues growth names (AAPL -> ~$124), so we always end with *something*."""
     if info is None:
         return
     if info.get("earningsGrowth") is not None or info.get("revenueGrowth") is not None:
         return  # source already provided forward growth (e.g. yfinance) — leave it
+
+    # 2. Real analyst forward estimates from BusinessQuant (when budget remains).
+    try:
+        from services.businessquant import forward_growth
+        bq = forward_growth(ticker)
+        if bq.get("earningsGrowth") is not None:
+            info["earningsGrowth"] = bq["earningsGrowth"]
+        if bq.get("revenueGrowth") is not None:
+            info["revenueGrowth"] = bq["revenueGrowth"]
+        if info.get("earningsGrowth") is not None or info.get("revenueGrowth") is not None:
+            return  # got real estimates — done
+    except Exception:
+        pass
+
+    # 3. Finnhub historical-growth proxy (uncapped) — always-available fallback.
     metric = _finnhub_metric(ticker)
     if not metric:
         return
