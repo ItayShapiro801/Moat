@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from config import FINANCIAL_SECTORS
 from utils import *
 from services.piotroski import compute_piotroski
-from services.dcf import compute_internal_dcf, fetch_external_dcf
+from services.dcf import compute_internal_dcf, fetch_external_dcf, compute_earnings_multiple_value
 from services.relative_value import detect_reorganization, compute_relative_value
 from services.blend import compute_blended_valuation
 from services import fmp_fallback as fmp
@@ -41,10 +41,50 @@ VALUATION_TTL = 24 * 3600  # 24 hours (was 3h) — valuation is intraday-stable 
 _VALUATION_CACHE: dict[str, tuple] = {}
 
 
+def _fresh_price(ticker: str):
+    """A cheap current price for refreshing a cached valuation, best-effort.
+    yfinance fast_info first (free/live when not blocked), then Finnhub (free,
+    uncapped). Deliberately does NOT touch FMP — we don't spend the capped budget
+    just to refresh a price. Returns None if no free source answers."""
+    try:
+        fi = yf.Ticker(ticker).fast_info
+        p = float(fi["last_price"])
+        if p and p > 0:
+            return p
+    except Exception:
+        pass
+    try:
+        from services import finnhub_fallback as FH
+        p = FH._quote_price(ticker)
+        if p and p > 0:
+            return float(p)
+    except Exception:
+        pass
+    return None
+
+
+def _with_fresh_price(payload: dict):
+    """Return the cached valuation with its price re-fetched live (statements stay
+    cached 24h, but the headline quote is never stale). Recomputes the price-derived
+    fields (current_price, margin_of_safety_pct) off the fresh price; leaves the
+    intrinsic value untouched. Falls back to the cached payload if no fresh price."""
+    price = _fresh_price(payload.get("ticker", ""))
+    if price is None:
+        return payload
+    updated = dict(payload)
+    updated["current_price"] = round(price, 2)
+    consensus = (payload.get("intrinsic_value") or {}).get("consensus")
+    if consensus and price:
+        updated["margin_of_safety_pct"] = round((consensus - price) / price * 100, 1)
+    return updated
+
+
 def _valuation_cache_get(ticker: str):
     entry = _VALUATION_CACHE.get(ticker)
     if entry and (_time.time() - entry[0]) < VALUATION_TTL:
-        return entry[1]
+        # Statements/valuation are cached 24h, but refresh the price so the headline
+        # quote (and margin of safety) stay live rather than up to a day stale.
+        return _with_fresh_price(entry[1])
     return None
 
 
@@ -66,13 +106,21 @@ def _valuation_cache_set(ticker: str, payload: dict) -> None:
 # a needless drain on the yfinance/FMP rate budget. Only successful full (non-
 # degraded) responses are cached here; the degraded fallback paths keep their own
 # short cache so the app still recovers quickly when a provider comes back.
-_DATA_TTL = 15 * 60  # 15 minutes — intraday-stable data
+# Statements (financials, metrics) barely move day to day and are the expensive
+# calls that drain the FMP budget, so they're cached 24h. Price-history is the live
+# price chart, so it keeps a short window and stays fresh.
+_DATA_TTL_STATEMENTS = 24 * 3600  # financials, metrics
+_DATA_TTL_PRICE = 15 * 60         # price-history (kept fresh)
 _DATA_CACHE: dict[str, tuple] = {}
+
+
+def _ttl_for(key: str) -> int:
+    return _DATA_TTL_PRICE if key.startswith("price-history:") else _DATA_TTL_STATEMENTS
 
 
 def _data_cache_get(key: str):
     entry = _DATA_CACHE.get(key)
-    if entry and (_time.time() - entry[0]) < _DATA_TTL:
+    if entry and (_time.time() - entry[0]) < _ttl_for(key):
         return entry[1]
     return None
 
@@ -114,9 +162,18 @@ def _locked_cache(ckey: str, producer):
 
 def _resolve_market_data(ticker: str):
     """Acquire data for the FULL valuation engine, trying providers in order and
-    returning (stock_like, info, source). yfinance is tried first for speed/
-    freshness; if it's blocked or empty, FMP becomes the full primary source via
-    an adapter that mimics yfinance's shape so the engine runs unchanged.
+    returning (stock_like, info, source).
+
+    Order: yfinance -> FMP -> (SEC EDGAR + Finnhub) -> none.
+      1. yfinance — fast/fresh when the host IP isn't blocked (free).
+      2. FMP — the PRIMARY provider (750/day across the rotated keys). It carries
+         the best inputs (analyst forward estimates, a full multiples history), so
+         we always use it while it has any budget left.
+      3. EDGAR + Finnhub — the free, uncapped BACKUP, used ONLY when FMP is fully
+         exhausted. EDGAR supplies the statements (straight from SEC filings) and
+         Finnhub supplies the price + current multiples + growth. Slightly less
+         accurate than FMP (no analyst forward estimates), but keeps the site fully
+         alive and usable when the FMP daily budget is gone.
     Returns (None, None, None) when no FULL-data provider is available (the caller
     then degrades to a quote-only response)."""
     # 1. yfinance — fast and fresh when the host IP isn't blocked.
@@ -127,9 +184,12 @@ def _resolve_market_data(ticker: str):
             return stock, info, "yfinance"
     except Exception:
         pass
-    # 2. SEC EDGAR — free, uncapped statements for US filers (companyfacts). Tried
-    #    before FMP because it doesn't burn the limited FMP daily budget (it needs
-    #    only ~1 FMP call for historical prices vs ~8 for the full FMP bundle).
+    # 2. FMP — PRIMARY. Full valuation via the adapter; used whenever it has budget.
+    bundle = build_fmp_bundle(ticker)
+    if bundle is not None:
+        stock, info = bundle
+        return stock, info, "fmp"
+    # 3. SEC EDGAR + Finnhub — free/uncapped BACKUP, only reached once FMP is spent.
     try:
         bundle = build_edgar_bundle(ticker)
         if bundle is not None:
@@ -137,11 +197,6 @@ def _resolve_market_data(ticker: str):
             return stock, info, "edgar"
     except Exception:
         pass
-    # 3. FMP — official API, full valuation for non-US names EDGAR can't cover.
-    bundle = build_fmp_bundle(ticker)
-    if bundle is not None:
-        stock, info = bundle
-        return stock, info, "fmp"
     # 4. No full-data provider; caller handles degraded quote-only path.
     return None, None, None
 
@@ -281,6 +336,16 @@ def analyze(ticker: str):
         consensus_sources.append(ext_dcf)
     if rel_val and rel_val > 0:
         consensus_sources.append(rel_val)
+
+    # Earnings-multiple anchor (fair P/E × EPS). An independent, earnings-based
+    # estimate that stays sane for hyper-capex names whose FCF-DCF collapses
+    # (AMZN/TSLA) and for FINANCIALS (where a DCF doesn't apply and P/E is the
+    # standard lens — for those it's often the ONLY usable source). Included
+    # whenever the company is profitable; keeps the consensus grounded in earnings.
+    earn_mult = compute_earnings_multiple_value(info, sector, dcf_result.get("growth_rate"))
+    if earn_mult and earn_mult > 0:
+        consensus_sources.append(earn_mult)
+
     consensus = round(sum(consensus_sources) / len(consensus_sources), 2) if consensus_sources else None
 
     # Fix 1: Consensus consistency. If ALL DCF scenarios are N/A but a consensus

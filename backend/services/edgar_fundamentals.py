@@ -214,7 +214,7 @@ def build_edgar_bundle(ticker: str):
     balance_sheet.loc["Share Issued"] = [_num(series["_shares"].get(e)) for e in year_ends]
 
     # --- Market data (EDGAR has none): current price + sector/name + history ---
-    price, sector, name, beta, mkt_shares = _market_context(ticker)
+    price, sector, name, beta, mkt_shares, metric = _market_context(ticker)
     if price is None:
         return None  # can't value without a current price
     name = facts_bundle.get("name") or name or ticker
@@ -261,16 +261,51 @@ def build_edgar_bundle(ticker: str):
         "ebitda": (opinc + da) if (opinc is not None and da is not None) else opinc,
         "enterpriseValue": (market_cap + ltd - cash) if market_cap else None,
         "bookValue": (equity / shares) if (equity and shares) else None,
-        # No forward analyst estimates from EDGAR -> DCF uses historical CAGR, and
-        # the consensus defers to the external forward DCF where available.
-        "earningsGrowth": None,
-        "revenueGrowth": None,
+        # Growth: Finnhub's free stock/metric gives historical eps/revenue growth,
+        # used as a forward-ish proxy (no free source provides true analyst
+        # estimates). _growth_from_metric blends the 5y trend with recent TTM YoY.
+        "earningsGrowth": _growth_from_metric(metric, "eps"),
+        "revenueGrowth": _growth_from_metric(metric, "revenue"),
         "forwardEps": None,
         "longBusinessSummary": "",
+        # Current market multiples from Finnhub (uncapped), so the relative-value
+        # step works without FMP's historical prices. Consumed by _relative_from_metric.
+        "_finnhub_metric": metric,
+        "trailingPE": _num(metric.get("peTTM")) or _num(metric.get("peBasicExclExtraTTM")),
     }
 
     stock = _FmpStock(info, financials, balance_sheet, cashflow, pd.DataFrame(), prices_df)
     return stock, info
+
+
+def _growth_from_metric(metric, kind):
+    """Forward-ish growth rate (fraction) from Finnhub's historical growth figures.
+
+    No free source gives true analyst forward estimates, so we proxy the future with
+    the company's own recent trajectory: blend the 5-year CAGR (durable trend) with
+    the latest TTM-YoY (recent momentum), 60/40. Finnhub reports these as percents.
+    Falls back across eps<->revenue if one is missing. Returns None if neither."""
+    if not metric:
+        return None
+    if kind == "eps":
+        five, ttm, alt = "epsGrowth5Y", "epsGrowthTTMYoy", "revenueGrowth5Y"
+    else:
+        five, ttm, alt = "revenueGrowth5Y", "revenueGrowthTTMYoy", "epsGrowth5Y"
+    g5 = _num(metric.get(five))
+    gt = _num(metric.get(ttm))
+    ga = _num(metric.get(alt))
+    parts = []
+    if g5 is not None:
+        parts.append((g5, 0.6))
+    if gt is not None:
+        parts.append((gt, 0.4))
+    if not parts and ga is not None:
+        parts.append((ga, 1.0))
+    if not parts:
+        return None
+    wsum = sum(w for _, w in parts)
+    pct = sum(v * w for v, w in parts) / wsum
+    return pct / 100.0  # percent -> fraction
 
 
 # Finnhub's `finnhubIndustry` uses its own taxonomy; the valuation engine keys off
@@ -316,7 +351,7 @@ def _map_sector(finnhub_industry):
 
 
 def _market_context(ticker: str):
-    """(current_price, sector, name, beta, shares) for an EDGAR filer.
+    """(current_price, sector, name, beta, shares, metric) for an EDGAR filer.
 
     The current PRICE is the one hard requirement (no price -> no valuation), and it
     must survive the FMP daily cap — the whole point of the EDGAR path. So price comes
@@ -324,8 +359,14 @@ def _market_context(ticker: str):
     sector/name/beta/shares. FMP quote is only a last-resort price backup (rotates
     across the configured keys). Finnhub is used *solely* for market data here, never
     statements. `shares` is a fallback for the handful of filers whose XBRL weighted-
-    average diluted share count isn't in a standard tag (e.g. Visa, multi-class)."""
+    average diluted share count isn't in a standard tag (e.g. Visa, multi-class).
+
+    `metric` is Finnhub's full `stock/metric` dict (free, uncapped): it carries the
+    forward-ish growth rates (eps/revenue 5y) and current market multiples (P/E, P/S,
+    EV/FCF) that EDGAR statements can't provide — this is what lets the EDGAR path
+    produce a GOOD valuation (DCF growth + relative value) without any FMP call."""
     price = sector = name = beta = shares = None
+    metric = {}
     try:
         from services import finnhub_fallback as FH
         price = FH._quote_price(ticker)
@@ -338,7 +379,8 @@ def _market_context(ticker: str):
             shares = so * 1e6 if so else None
         met = FH._get(f"stock/metric?symbol={ticker}&metric=all")
         if isinstance(met, dict):
-            beta = _num((met.get("metric") or {}).get("beta"))
+            metric = met.get("metric") or {}
+            beta = _num(metric.get("beta"))
     except Exception:
         pass
     if price is None:  # last resort: FMP quote (only if it still has budget)
@@ -347,7 +389,7 @@ def _market_context(ticker: str):
         price = _num(q.get("price"))
         name = name or q.get("name")
         shares = shares or _num(q.get("sharesOutstanding"))
-    return price, sector, name, beta, shares
+    return price, sector, name, beta, shares, metric
 
 
 def _historical_prices(ticker: str):

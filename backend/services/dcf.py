@@ -56,6 +56,34 @@ def _normalize_base_fcf(latest_fcf, fcf_5yr, revenue_5yr):
     return max(latest_fcf, normalized) if normalized > 0 else latest_fcf
 
 
+def compute_earnings_multiple_value(info, sector, growth_rate):
+    """A PEG-anchored fair-P/E × EPS valuation, per share, or None.
+
+    The FCF-based DCF is the wrong lens for companies whose reported free cash flow
+    is structurally thin/volatile relative to earning power (hyper-capex names like
+    AMZN, TSLA) — it yields absurd values there. Earnings are the more stable anchor
+    for those, so this provides a second, independent estimate:
+
+        fair_pe  = clamp( 15 + growth% , sector floor..cap )   # PEG≈1-ish, growth-aware
+        value    = fair_pe × trailing EPS
+
+    The fair P/E is DERIVED from growth (not the stock's own possibly-insane current
+    P/E), and hard-capped by sector so a hot multiple can't self-justify. Returns
+    None without positive EPS (loss-makers get no earnings anchor)."""
+    eps = safe_get(info, "trailingEps")
+    if eps is None or eps <= 0:
+        return None
+    g = growth_rate if (growth_rate is not None) else 0.0
+    g_pct = max(0.0, min(g, 0.40)) * 100  # cap growth contribution at 40%
+    # Base 15x (a mature-market P/E) plus one turn per point of growth (PEG≈1),
+    # then clamp to a sane sector band so nothing runs away.
+    high_growth = {"Technology", "Communication Services", "Healthcare"}
+    pe_cap = 45 if sector in high_growth else 32
+    pe_floor = 10
+    fair_pe = max(pe_floor, min(15 + g_pct, pe_cap))
+    return round(fair_pe * eps, 2)
+
+
 def compute_internal_dcf(info, fcf_5yr, sector, revenue_5yr=None):
     beta = safe_get(info, "beta", 1.0)
     shares = safe_get(info, "sharesOutstanding", 0)
