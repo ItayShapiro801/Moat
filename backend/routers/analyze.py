@@ -21,7 +21,7 @@ from services.relative_value import detect_reorganization, compute_relative_valu
 from services.blend import compute_blended_valuation
 from services import fmp_fallback as fmp
 from services.fmp_fallback import is_rate_limited, log_source, build_fmp_bundle
-from services.edgar_fundamentals import build_edgar_bundle
+from services.edgar_fundamentals import build_edgar_bundle, enrich_growth
 
 router = APIRouter()
 
@@ -228,6 +228,12 @@ def analyze(ticker: str):
         raise HTTPException(status_code=503, detail=f"Data temporarily unavailable for {ticker}.")
 
     log_source("analyze", ticker, source)
+
+    # Backfill forward-ish growth from Finnhub (free/uncapped) for any source that
+    # didn't supply it — notably FMP's free tier, which leaves growth None and would
+    # otherwise force the DCF onto a weak historical CAGR (AAPL -> ~$124). This makes
+    # valuation quality independent of which provider served the statements.
+    enrich_growth(ticker, info)
 
     current_price = safe_get(info, "currentPrice") or safe_get(info, "regularMarketPrice", 0)
     company_name = safe_get(info, "longName") or safe_get(info, "shortName", ticker)

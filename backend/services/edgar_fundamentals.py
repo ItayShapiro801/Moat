@@ -308,6 +308,53 @@ def _growth_from_metric(metric, kind):
     return pct / 100.0  # percent -> fraction
 
 
+# Cache Finnhub's stock/metric per ticker (24h) so enriching every source doesn't
+# add a call when we've already fetched it (e.g. the EDGAR path fetched it too).
+_METRIC_CACHE: dict[str, tuple] = {}
+_METRIC_TTL = 24 * 3600
+
+
+def _finnhub_metric(ticker: str) -> dict:
+    """Finnhub's free/uncapped stock/metric dict for a ticker (cached 24h)."""
+    ticker = ticker.upper()
+    hit = _METRIC_CACHE.get(ticker)
+    if hit and time.time() - hit[0] < _METRIC_TTL:
+        return hit[1]
+    metric = {}
+    try:
+        from services import finnhub_fallback as FH
+        met = FH._get(f"stock/metric?symbol={ticker}&metric=all")
+        if isinstance(met, dict):
+            metric = met.get("metric") or {}
+    except Exception:
+        pass
+    _METRIC_CACHE[ticker] = (time.time(), metric)
+    return metric
+
+
+def enrich_growth(ticker: str, info: dict) -> None:
+    """Fill in forward-ish growth on `info` IN PLACE when the data source didn't
+    provide it. yfinance gives real analyst growth; FMP's free tier does NOT (leaves
+    earningsGrowth/revenueGrowth None), which made the DCF fall back to a weak
+    historical CAGR and undervalue growth names (AAPL -> ~$124). Finnhub's free,
+    uncapped stock/metric supplies a historical-growth proxy, so we backfill it for
+    ANY source that's missing it — making valuation quality independent of which
+    provider served the statements. Only fills gaps; never overrides real estimates."""
+    if info is None:
+        return
+    if info.get("earningsGrowth") is not None or info.get("revenueGrowth") is not None:
+        return  # source already provided forward growth (e.g. yfinance) — leave it
+    metric = _finnhub_metric(ticker)
+    if not metric:
+        return
+    eg = _growth_from_metric(metric, "eps")
+    rg = _growth_from_metric(metric, "revenue")
+    if eg is not None:
+        info["earningsGrowth"] = eg
+    if rg is not None:
+        info["revenueGrowth"] = rg
+
+
 # Finnhub's `finnhubIndustry` uses its own taxonomy; the valuation engine keys off
 # yfinance/GICS sector names (e.g. the DCF's high-growth terminal bucket
 # {Technology, Communication Services, Healthcare} and FINANCIAL_SECTORS). Map the
@@ -377,10 +424,8 @@ def _market_context(ticker: str):
             # Finnhub reports shareOutstanding in MILLIONS.
             so = _num(prof.get("shareOutstanding"))
             shares = so * 1e6 if so else None
-        met = FH._get(f"stock/metric?symbol={ticker}&metric=all")
-        if isinstance(met, dict):
-            metric = met.get("metric") or {}
-            beta = _num(metric.get("beta"))
+        metric = _finnhub_metric(ticker)  # shared 24h cache (reused by enrich_growth)
+        beta = _num(metric.get("beta"))
     except Exception:
         pass
     if price is None:  # last resort: FMP quote (only if it still has budget)
