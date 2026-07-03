@@ -252,9 +252,16 @@ def _parse_llm_json(text):
     return None
 
 
-def _llm_call(system_prompt, user_prompt, max_tokens=900, order=("groq", "gemini", "cerebras")):
+def _llm_call(system_prompt, user_prompt, max_tokens=900, order=("cerebras", "groq", "gemini")):
     """Try LLM providers in order until one returns parseable JSON.
-    Returns (parsed_dict, source) or (None, None) if all fail."""
+    Returns (parsed_dict, source) or (None, None) if all fail.
+
+    Order puts Cerebras FIRST: on these free tiers Groq and Gemini are frequently
+    rate-limited/quota-exhausted (observed 0/3 success), while Cerebras (gpt-oss-120b)
+    is reliably up (3/3). Leading with the working provider means calls succeed
+    immediately instead of burning time failing through two dead providers first —
+    which was making the single-shot cards (valuation-review) intermittently blank.
+    Groq/Gemini remain as backups for when their daily quotas reset."""
     for name in order:
         has_key, fn = _PROVIDERS[name]
         if not has_key():
@@ -269,7 +276,7 @@ def _llm_call(system_prompt, user_prompt, max_tokens=900, order=("groq", "gemini
     return None, None
 
 
-def _llm_json(system_prompt, user_prompt, max_tokens=900, order=("groq", "gemini", "cerebras")):
+def _llm_json(system_prompt, user_prompt, max_tokens=900, order=("cerebras", "groq", "gemini")):
     parsed, _ = _llm_call(system_prompt, user_prompt, max_tokens, order)
     return parsed
 

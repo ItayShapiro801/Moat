@@ -411,10 +411,12 @@ def _generate_deep_research(ticker: str):
         f"DATA:\n{json_mod.dumps(data, indent=2, default=str)}"
     )
 
-    # Gemini PRIMARY for long-form quality, then Groq, then Cerebras.
+    # Cerebras first — it's the reliably-available provider on the free tiers
+    # (Groq/Gemini frequently quota-exhausted); Gemini/Groq remain backups for
+    # long-form quality when their quotas reset.
     parsed, source = _llm_call(
         DEEP_RESEARCH_SYSTEM, user_prompt, max_tokens=8000,
-        order=("gemini", "groq", "cerebras"),
+        order=("cerebras", "gemini", "groq"),
     )
     if not parsed:
         raise HTTPException(status_code=502, detail="Deep research generation failed (all providers).")
