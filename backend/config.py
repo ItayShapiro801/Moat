@@ -42,6 +42,18 @@ BUSINESSQUANT_API_KEYS = [
     ) if k
 ]
 
+# Supabase — used by the backend as a PERSISTENT cache that survives Render's free
+# tier restarts (which wipe the in-memory cache every ~15 min idle, forcing every
+# stock to be re-fetched and draining the FMP budget). SUPABASE_URL is the project
+# URL; SUPABASE_SERVICE_KEY is the service-role key (secret, backend-only — bypasses
+# RLS so the server can read/write the cache table). Optional: if unset, the cache
+# is purely in-memory (prior behavior). Accepts the frontend's NEXT_PUBLIC_ names too.
+SUPABASE_URL = (
+    os.getenv("SUPABASE_URL", "")
+    or os.getenv("NEXT_PUBLIC_SUPABASE_URL", "")
+).replace("/rest/v1/", "").replace("/rest/v1", "").rstrip("/")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "") or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+
 # Comma-separated list of browser origins allowed by CORS. Defaults to the local
 # dev frontend; in production set CORS_ALLOWED_ORIGINS to the deployed site URL(s).
 CORS_ORIGINS = [

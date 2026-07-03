@@ -293,11 +293,27 @@ def _fund_holdings(cik):
 
 
 def _company_name_for(ticker):
+    # yfinance first (fast when the host IP isn't blocked)...
     try:
         info = yf.Ticker(ticker).info
-        return safe_get(info, "longName") or safe_get(info, "shortName", ticker)
+        name = safe_get(info, "longName") or safe_get(info, "shortName")
+        if name:
+            return name
     except Exception:
-        return ticker
+        pass
+    # ...but on cloud hosts yfinance is blocked, so fall back to the shared resolver
+    # (EDGAR/Finnhub give the real company name). Without this the name defaulted to
+    # the ticker, so the 13F name-match failed and EVERY fund showed holds=False.
+    try:
+        from routers.analyze import _resolve_market_data
+        _stock, info, _src = _resolve_market_data(ticker)
+        if info:
+            name = safe_get(info, "longName") or safe_get(info, "shortName")
+            if name:
+                return name
+    except Exception:
+        pass
+    return ticker
 
 
 

@@ -79,24 +79,46 @@ def _with_fresh_price(payload: dict):
     return updated
 
 
+# Persistent second tier for the valuation cache. Render's free tier wipes the
+# in-memory dict on every ~15-min-idle restart, so without this each stock is
+# re-fetched (≈7 FMP calls) on the next visit and the daily budget drains fast.
+# Supabase keeps a computed valuation alive for its full TTL across restarts.
+# Best-effort: if Supabase isn't configured/available it's a no-op and we behave
+# exactly as before (in-memory only).
+from services import supabase_cache as _sb
+
+_SB_VAL_PREFIX = "valuation:"
+
+
 def _valuation_cache_get(ticker: str):
     entry = _VALUATION_CACHE.get(ticker)
     if entry and (_time.time() - entry[0]) < VALUATION_TTL:
         # Statements/valuation are cached 24h, but refresh the price so the headline
         # quote (and margin of safety) stay live rather than up to a day stale.
         return _with_fresh_price(entry[1])
+    # Miss (or wiped by a restart): try the persistent Supabase copy.
+    payload = _sb.cache_get(f"{_SB_VAL_PREFIX}{ticker}")
+    if payload is not None:
+        # Rehydrate the in-memory tier so subsequent hits are instant, then serve
+        # with a fresh price like the in-memory path.
+        _VALUATION_CACHE[ticker] = (_time.time(), payload)
+        return _with_fresh_price(payload)
     return None
 
 
 def _valuation_cache_get_stale(ticker: str):
     """Last full valuation regardless of age — served when providers can't
-    produce a fresh one (a stale-but-real valuation beats degraded quote-only)."""
+    produce a fresh one (a stale-but-real valuation beats degraded quote-only).
+    Checks memory first, then the persistent Supabase copy."""
     entry = _VALUATION_CACHE.get(ticker)
-    return entry[1] if entry else None
+    if entry:
+        return entry[1]
+    return _sb.get_value_any_age(f"{_SB_VAL_PREFIX}{ticker}")
 
 
 def _valuation_cache_set(ticker: str, payload: dict) -> None:
     _VALUATION_CACHE[ticker] = (_time.time(), payload)
+    _sb.cache_set(f"{_SB_VAL_PREFIX}{ticker}", payload, VALUATION_TTL)
 
 
 # Short-TTL cache for the supporting data endpoints (/metrics, /financials,
@@ -602,14 +624,23 @@ def _financials_impl(ticker: str, ckey: str):
     except Exception:
         inc = cf = bs = None
 
-    # Empty income statement is the rate-limit symptom; try the FMP fallback
-    # (which rotates across the configured keys). No Finnhub tier.
+    # Empty income statement is the rate-limit symptom; try the FMP fallback, then
+    # the free EDGAR bundle (its statement DataFrames are the same shape) so the
+    # revenue/EPS/FCF charts still render when FMP is capped.
     if inc is None or getattr(inc, "empty", True):
         fb = fmp.financials_fallback(ticker)
         if fb is not None:
             log_source("financials", ticker, "fmp_fallback")
             return fb
-        # No fallback data: fall through with empty frames -> empty arrays (prior behavior).
+        try:
+            bundle = build_edgar_bundle(ticker)
+            if bundle is not None:
+                estock, _einfo = bundle
+                inc, cf, bs = estock.financials, estock.cashflow, estock.balance_sheet
+                log_source("financials", ticker, "edgar")
+        except Exception:
+            pass
+        # Still nothing: fall through with empty frames -> empty arrays (prior behavior).
         import pandas as pd
         inc = inc if inc is not None else pd.DataFrame()
         cf = cf if cf is not None else pd.DataFrame()
@@ -691,13 +722,23 @@ def _metrics_impl(ticker: str, ckey: str):
         info = {}
 
     # Empty info (no market cap / price) is the rate-limit symptom; try the FMP
-    # fallback (rotates across the configured keys). No Finnhub tier.
+    # fallback (rotates across the configured keys), then the free EDGAR+Finnhub
+    # bundle so /metrics still populates (P/E, margins, etc.) when FMP is capped —
+    # previously this returned all-null and the "About" card showed "Couldn't load".
     if not info or (info.get("marketCap") is None and info.get("currentPrice") is None
                     and info.get("regularMarketPrice") is None):
         fb = fmp.metrics_fallback(ticker)
         if fb is not None:
             log_source("metrics", ticker, "fmp_fallback")
             return fb
+        try:
+            bundle = build_edgar_bundle(ticker)
+            if bundle is not None:
+                _stock_e, info = bundle  # EDGAR info has price/mcap/eps/margins
+                enrich_growth(ticker, info)
+                log_source("metrics", ticker, "edgar")
+        except Exception:
+            pass
     else:
         log_source("metrics", ticker, "yfinance")
 
