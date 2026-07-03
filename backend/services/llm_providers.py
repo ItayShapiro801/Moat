@@ -199,7 +199,10 @@ def _provider_cerebras(system_prompt, user_prompt, max_tokens):
     from cerebras.cloud.sdk import Cerebras
     client = Cerebras(api_key=CEREBRAS_API_KEY, timeout=_LLM_TIMEOUT, max_retries=0)
     resp = client.chat.completions.create(
-        model="llama-3.3-70b",
+        # This key's catalog is gpt-oss-120b / zai-glm-4.7 / gemma-4-31b — the old
+        # "llama-3.3-70b" 404s (model not available on this account), which silently
+        # killed the whole Cerebras tier. gpt-oss-120b is the strongest that works.
+        model="gpt-oss-120b",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -219,6 +222,36 @@ _PROVIDERS = {
 
 
 
+def _parse_llm_json(text):
+    """Parse JSON from an LLM response, tolerating markdown fences / preambles.
+    Some models wrap JSON in ```json ... ``` or add a sentence before it even when
+    asked not to; a bare json.loads would throw and wrongly discard a good answer."""
+    if not text:
+        return None
+    try:
+        return json_mod.loads(text)
+    except Exception:
+        pass
+    # Strip a ```json ... ``` (or ``` ... ```) fence if present.
+    t = text.strip()
+    if "```" in t:
+        import re
+        m = re.search(r"```(?:json)?\s*(.*?)```", t, re.DOTALL)
+        if m:
+            try:
+                return json_mod.loads(m.group(1).strip())
+            except Exception:
+                pass
+    # Last resort: grab the outermost {...} object.
+    start, end = t.find("{"), t.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return json_mod.loads(t[start:end + 1])
+        except Exception:
+            pass
+    return None
+
+
 def _llm_call(system_prompt, user_prompt, max_tokens=900, order=("groq", "gemini", "cerebras")):
     """Try LLM providers in order until one returns parseable JSON.
     Returns (parsed_dict, source) or (None, None) if all fail."""
@@ -228,7 +261,9 @@ def _llm_call(system_prompt, user_prompt, max_tokens=900, order=("groq", "gemini
             continue
         try:
             text = fn(system_prompt, user_prompt, max_tokens)
-            return json_mod.loads(text), name
+            parsed = _parse_llm_json(text)
+            if parsed is not None:
+                return parsed, name
         except Exception:
             continue
     return None, None
