@@ -261,11 +261,13 @@ def build_edgar_bundle(ticker: str):
         "ebitda": (opinc + da) if (opinc is not None and da is not None) else opinc,
         "enterpriseValue": (market_cap + ltd - cash) if market_cap else None,
         "bookValue": (equity / shares) if (equity and shares) else None,
-        # Growth: Finnhub's free stock/metric gives historical eps/revenue growth,
-        # used as a forward-ish proxy (no free source provides true analyst
-        # estimates). _growth_from_metric blends the 5y trend with recent TTM YoY.
-        "earningsGrowth": _growth_from_metric(metric, "eps"),
-        "revenueGrowth": _growth_from_metric(metric, "revenue"),
+        # Growth is deliberately left None here. If we pre-filled it with the Finnhub
+        # PROXY, the downstream enrich_growth() would see a non-None value and skip
+        # BusinessQuant entirely — so the EDGAR path would NEVER use the real analyst
+        # forward estimates (the whole reason BQ exists). enrich_growth() runs right
+        # after resolution and fills this best-to-good: BQ real estimate -> proxy.
+        "earningsGrowth": None,
+        "revenueGrowth": None,
         "forwardEps": None,
         "longBusinessSummary": "",
         # Current market multiples from Finnhub (uncapped), so the relative-value
