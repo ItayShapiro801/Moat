@@ -107,14 +107,15 @@ export default function ScreenerPage() {
           <div className="flex justify-center py-10 text-moat-text-muted animate-pulse">
             Filtering…
           </div>
-        ) : note ? (
-          <p className="text-sm text-moat-text-muted text-center py-8">{note}</p>
         ) : results.length === 0 ? (
           <p className="text-sm text-moat-text-muted text-center py-8">
-            No stocks match these filters. Try loosening them.
+            {note ?? "No stocks match these filters. Try loosening them."}
           </p>
         ) : (
           <div className="overflow-x-auto">
+            {note && (
+              <p className="text-xs text-moat-warning mb-2">⚠ {note}</p>
+            )}
             <p className="text-xs text-moat-text-muted mb-3">
               {results.length} match{results.length === 1 ? "" : "es"}
             </p>

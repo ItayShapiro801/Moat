@@ -209,6 +209,7 @@ def analyze_fallback(ticker: str) -> dict | None:
     price = _num(quote.get("price"))
     if price is None:
         price = _num(profile.get("price"))
+    price = _cross_validate_price(ticker, price, quote)
     name = profile.get("companyName") or quote.get("name") or ticker
     sector = profile.get("sector") or ""
     currency = profile.get("currency") or "USD"
@@ -343,7 +344,24 @@ def metrics_fallback(ticker: str) -> dict | None:
         pe_val = _num(ratios.get("priceToEarningsRatio"))
         if price is not None and pe_val:
             eps = price / pe_val
+    # Stale-quote guard: FMP's ratio endpoints are computed with FMP's own price,
+    # so a stale quote (observed: MU at $166 vs the real $975) silently poisons
+    # every price-dependent multiple. Those multiples are LINEAR in price, so when
+    # the cross-check detects staleness we rescale them exactly. (EPS and other
+    # per-share fundamentals don't depend on price and pass through unchanged.)
+    _raw_p = _num(quote.get("price"))
+    _fresh_p = _cross_validate_price(ticker, _raw_p, quote)
+    _scale = (_fresh_p / _raw_p) if (_raw_p and _fresh_p and _raw_p > 0
+                                     and abs(_fresh_p - _raw_p) / max(_fresh_p, _raw_p) > 0.25) else 1.0
+
+    def _scaled(v):
+        return v * _scale if v is not None else None
+
+    if market_cap is not None:
+        market_cap = market_cap * _scale
     div_yield = _num(ratios.get("dividendYield"))
+    if div_yield is not None and _scale != 1.0:
+        div_yield = div_yield / _scale  # yield moves inversely with price
     payout = _num(ratios.get("dividendPayoutRatio"))
     # The live /metrics endpoint maps "roic" from returnOnAssets; mirror that.
     roa = _num(km.get("returnOnAssets"))
@@ -352,12 +370,12 @@ def metrics_fallback(ticker: str) -> dict | None:
     payload = {
         "ticker": ticker,
         "valuation": {
-            "pe_ratio": r1(_num(ratios.get("priceToEarningsRatio"))),
+            "pe_ratio": r1(_scaled(_num(ratios.get("priceToEarningsRatio")))),
             "forward_pe": None,  # not on FMP free tier
-            "pb_ratio": r1(_num(ratios.get("priceToBookRatio"))),
+            "pb_ratio": r1(_scaled(_num(ratios.get("priceToBookRatio")))),
             "ev_ebitda": r1(_num(km.get("evToEBITDA")) or _num(ratios.get("enterpriseValueMultiple"))),
-            "p_fcf": r1(_num(ratios.get("priceToFreeCashFlowRatio"))),
-            "peg_ratio": r2(_num(ratios.get("priceToEarningsGrowthRatio"))),
+            "p_fcf": r1(_scaled(_num(ratios.get("priceToFreeCashFlowRatio")))),
+            "peg_ratio": r2(_scaled(_num(ratios.get("priceToEarningsGrowthRatio")))),
         },
         "dividends": {
             "dividend_yield": r2(div_yield * 100) if div_yield is not None else None,

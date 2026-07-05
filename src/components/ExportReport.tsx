@@ -25,6 +25,7 @@ interface ReportData {
   f_score: number;
   valuation_breakdown: {
     internal_dcf: number | null;
+    earnings_multiple?: number | null;
     external_dcf: number | null;
     relative_value: number | null;
     dcf_excluded?: boolean;
@@ -246,9 +247,10 @@ export function ExportReport({
     // Valuation Breakdown
     section("Valuation Breakdown");
     const vb = data.valuation_breakdown;
-    row("Internal DCF", vb.dcf_excluded ? "Excluded (sector)" : fmt$(vb.internal_dcf));
+    row("Internal Model (DCF / excess-return)", vb.dcf_excluded ? "Not applicable" : fmt$(vb.internal_dcf));
     row("External DCF (FMP)", fmt$(vb.external_dcf));
     row("Relative Value (multiples)", fmt$(vb.relative_value));
+    if (vb.earnings_multiple != null) row("Earnings Multiple", fmt$(vb.earnings_multiple));
     row("Blended Intrinsic Value", fmt$(iv));
     y += 16;
 

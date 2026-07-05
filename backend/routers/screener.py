@@ -23,6 +23,13 @@ SCREENER_CACHE_PATH = os.path.join(
 
 
 
+# Screener results are a batch snapshot (rebuilt via run_screener.py), valid for a
+# month: fundamentals move slowly, but serving a years-old snapshot forever would
+# silently lie. Past the window we still serve (stale beats blank) with an honest
+# stale flag + note the UI can surface.
+_SCREENER_MAX_AGE_DAYS = 31
+
+
 @router.get("/screener")
 def screener(min_margin_of_safety: float = -1000, min_f_score: int = 0):
     if not os.path.exists(SCREENER_CACHE_PATH):
@@ -37,6 +44,15 @@ def screener(min_margin_of_safety: float = -1000, min_f_score: int = 0):
             cache = json_mod.load(f)
     except Exception:
         raise HTTPException(status_code=500, detail="Could not read screener cache.")
+
+    stale = False
+    try:
+        import datetime as _dt
+        built = _dt.datetime.fromisoformat(str(cache.get("last_updated", "")).replace("Z", "+00:00"))
+        age_days = (_dt.datetime.now(_dt.timezone.utc) - built).days
+        stale = age_days > _SCREENER_MAX_AGE_DAYS
+    except Exception:
+        pass
 
     matches = []
     for row in cache.get("results", []):
@@ -56,6 +72,11 @@ def screener(min_margin_of_safety: float = -1000, min_f_score: int = 0):
         "count": len(matches),
         "total_screened": len(cache.get("results", [])),
         "results": matches,
+        **({
+            "stale": True,
+            "note": "Screener data is more than a month old — valuations may have "
+                    "drifted. A rebuild is pending.",
+        } if stale else {}),
     }
 
 
