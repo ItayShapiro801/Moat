@@ -87,7 +87,9 @@ def _with_fresh_price(payload: dict):
 # exactly as before (in-memory only).
 from services import supabase_cache as _sb
 
-_SB_VAL_PREFIX = "valuation:"
+# Versioned key: bump when the valuation MODEL changes so stale pre-fix numbers in
+# the persistent cache are ignored rather than served for up to a full TTL.
+_SB_VAL_PREFIX = "valuation:v2:"
 
 
 def _valuation_cache_get(ticker: str):
@@ -353,17 +355,20 @@ def analyze(ticker: str):
         base_value and base_value > 0 and not is_financial
         and (dcf_is_business or not has_external)
     )
-    consensus_sources = []
+    # Labeled sources so the UI's Valuation Breakdown shows EXACTLY what went into
+    # the consensus and at what weight — previously the earnings anchor was a hidden
+    # fourth input, so the displayed numbers didn't add up to the headline value.
+    consensus_sources = []  # list of (label, value)
     if internal_reliable:
-        consensus_sources.append(base_value)
+        consensus_sources.append(("internal_dcf", base_value))
     # Use the external forward DCF unless it mismatches a *reliable* internal DCF
     # (when the internal one is the unreliable historical-CAGR fallback, the
     # "mismatch" is the internal's fault, so we still trust the external).
     ext_usable = has_external and (not blend["source_mismatch_warning"] or not internal_reliable)
     if ext_usable:
-        consensus_sources.append(ext_dcf)
+        consensus_sources.append(("external_dcf", ext_dcf))
     if rel_val and rel_val > 0:
-        consensus_sources.append(rel_val)
+        consensus_sources.append(("relative_value", rel_val))
 
     # Earnings-multiple anchor (fair P/E × EPS). An independent, earnings-based
     # estimate that stays sane for hyper-capex names whose FCF-DCF collapses
@@ -372,9 +377,18 @@ def analyze(ticker: str):
     # whenever the company is profitable; keeps the consensus grounded in earnings.
     earn_mult = compute_earnings_multiple_value(info, sector, dcf_result.get("growth_rate"))
     if earn_mult and earn_mult > 0:
-        consensus_sources.append(earn_mult)
+        consensus_sources.append(("earnings_multiple", earn_mult))
 
-    consensus = round(sum(consensus_sources) / len(consensus_sources), 2) if consensus_sources else None
+    consensus = (
+        round(sum(v for _, v in consensus_sources) / len(consensus_sources), 2)
+        if consensus_sources else None
+    )
+    # Equal weights across included sources — this is the ACTUAL math of the
+    # consensus, surfaced so the UI can display truthful per-source weights.
+    consensus_weights = (
+        {label: round(1 / len(consensus_sources), 4) for label, _ in consensus_sources}
+        if consensus_sources else {}
+    )
 
     # Fix 1: Consensus consistency. If ALL DCF scenarios are N/A but a consensus
     # was still produced (from FMP + multiples), flag it as partial so the UI
@@ -476,8 +490,13 @@ def analyze(ticker: str):
             "dcf_excluded": dcf_excluded,
             "external_dcf": round(ext_dcf, 2) if ext_dcf else None,
             "relative_value": rel_val,
+            "earnings_multiple": earn_mult,
             "relative_factors": rel_factors,
             "blend_weights": blend["blend_weights"],
+            # The consensus is an equal-weight average of the sources below; these
+            # are the TRUE weights (the legacy blend_weights above are only used for
+            # adjustment/mismatch detection and confused the UI when displayed).
+            "consensus_weights": consensus_weights,
             "adjustments_applied": blend["adjustments_applied"],
             "source_mismatch_warning": blend["source_mismatch_warning"],
         },

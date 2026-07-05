@@ -17,8 +17,21 @@ from config import FMP_API_KEY
 from utils import *
 
 def _run_dcf(base_fcf, growth_rate, wacc, tgr, net_debt, shares):
-    """Run the 2-stage DCF formula for one parameter set, return per-share fair value + EV/equity."""
-    proj = [round(base_fcf * (1 + growth_rate) ** y) for y in range(1, 6)]
+    """Run the DCF for one parameter set, return per-share fair value + EV/equity.
+
+    Growth FADES linearly from the starting rate toward the terminal rate across the
+    5 projection years (the standard analyst assumption) instead of compounding flat.
+    Compounding a high forward estimate (e.g. +30%) unchanged for 5 straight years
+    multiplied FCF ~4.5x and produced absurd fair values (e.g. $850-1200 vs a $170-580
+    price) — no analyst assumes year-5 growth equals next-year growth. With the fade,
+    year 1 uses the full estimate and each later year steps toward terminal, which is
+    also self-consistent with the terminal value growing at `tgr` forever after."""
+    proj = []
+    fcf = base_fcf
+    for y in range(1, 6):
+        g_y = growth_rate + (tgr - growth_rate) * (y - 1) / 5.0
+        fcf = fcf * (1 + g_y)
+        proj.append(round(fcf))
     disc_sum = sum(p / (1 + wacc) ** y for y, p in enumerate(proj, 1))
     tv = 0
     if wacc > tgr and proj:
@@ -68,17 +81,27 @@ def compute_earnings_multiple_value(info, sector, growth_rate):
         value    = fair_pe × trailing EPS
 
     The fair P/E is DERIVED from growth (not the stock's own possibly-insane current
-    P/E), and hard-capped by sector so a hot multiple can't self-justify. Returns
+    P/E), hard-capped by sector, AND sanity-capped against the multiple the market
+    actually pays today. Without the market cap, a high forward-growth estimate put
+    45x on companies the market prices at ~19x (cyclicals whose growth spike is a
+    rebound, not a re-rating) and printed fair values 2-3x the price. An analyst
+    lets growth argue for a premium to today's multiple — not triple it. Returns
     None without positive EPS (loss-makers get no earnings anchor)."""
     eps = safe_get(info, "trailingEps")
     if eps is None or eps <= 0:
         return None
     g = growth_rate if (growth_rate is not None) else 0.0
-    g_pct = max(0.0, min(g, 0.40)) * 100  # cap growth contribution at 40%
+    g_pct = max(0.0, min(g, 0.30)) * 100  # cap growth contribution at 30%
     # Base 15x (a mature-market P/E) plus one turn per point of growth (PEG≈1),
     # then clamp to a sane sector band so nothing runs away.
     high_growth = {"Technology", "Communication Services", "Healthcare"}
-    pe_cap = 45 if sector in high_growth else 32
+    pe_cap = 40 if sector in high_growth else 30
+    # Market-aware ceiling: allow at most a ~25% premium to the multiple the market
+    # pays today. If the market prices a stock at 19x, a growth story justifies ~24x
+    # — not 45x. (Skipped when the current P/E is unavailable.)
+    current_pe = safe_get(info, "trailingPE")
+    if current_pe and current_pe > 0:
+        pe_cap = min(pe_cap, current_pe * 1.25)
     pe_floor = 10
     fair_pe = max(pe_floor, min(15 + g_pct, pe_cap))
     return round(fair_pe * eps, 2)
@@ -115,11 +138,17 @@ def compute_internal_dcf(info, fcf_5yr, sector, revenue_5yr=None):
     else:
         last_3 = fcf_5yr[-3:] if len(fcf_5yr) >= 3 else fcf_5yr
         base_growth = compute_cagr(last_3)
-    base_growth = max(-0.15, min(base_growth, 0.35))
+    # Cap the STARTING growth at 25%: even genuine hyper-growers rarely sustain more,
+    # and the fade in _run_dcf already lets year 1 use it fully before stepping down.
+    # (The old 35% cap, compounded flat, was a large part of the inflated valuations.)
+    base_growth = max(-0.15, min(base_growth, 0.25))
 
-    # CAPM WACC
+    # CAPM WACC. Floor at 7.5%: low-beta names (defense, staples, beta ~0.3-0.5)
+    # otherwise get a ~6% discount rate, and with ~2.5-3.5% terminal growth that's a
+    # 30-60x terminal FCF multiple — the DCF prints 2-3x the market price on any
+    # stable business. No analyst discounts equity below ~7.5% regardless of beta.
     base_wacc = 0.045 + beta * 0.05
-    base_wacc = max(0.06, min(base_wacc, 0.13))
+    base_wacc = max(0.075, min(base_wacc, 0.13))
 
     # Terminal growth
     high_growth = {"Technology", "Communication Services", "Healthcare"}
@@ -145,7 +174,7 @@ def compute_internal_dcf(info, fcf_5yr, sector, revenue_5yr=None):
             "wacc": base_wacc,
         },
         "bull": {
-            "growth": min(base_growth * 1.4, 0.40),
+            "growth": min(base_growth * 1.4, 0.30),
             "wacc": max(base_wacc - 0.015, 0.05),
         },
     }

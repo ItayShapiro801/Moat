@@ -80,6 +80,13 @@ VALUATION_REVIEW_SYSTEM = (
     "- Reason ONLY from the numbers provided. Do NOT invent financial figures, "
     "analyst targets, or facts not in the data. If a needed number is missing, say "
     "so and widen your range.\n"
+    "- Think like an ANALYST, not a multiple-screener. Today's P/E is one input, "
+    "not the verdict: a business compounding revenue/earnings at a high rate can "
+    "deserve a premium to its current multiple, and a shrinking one a discount. "
+    "Weigh the forward growth rate, margin trend, balance-sheet strength and F-score "
+    "TOGETHER with the multiples. Do not be systematically conservative — being "
+    "anchored to the current price is as much an error as ignoring it. When growth "
+    "and quality justify it, it is fine to conclude a value well above the price.\n"
     "- Your estimates are informed JUDGEMENT, not precise calculations — never imply "
     "false precision. When the business is genuinely hard to value (no earnings, "
     "restructuring, extreme volatility), prefer LOW confidence and a WIDE range over "
@@ -151,8 +158,14 @@ def _generate_valuation_review(ticker: str):
             "internal_dcf": vb.get("internal_dcf"),
             "external_dcf": vb.get("external_dcf"),
             "relative_value": vb.get("relative_value"),
-            "weights": vb.get("blend_weights"),
+            "earnings_multiple": vb.get("earnings_multiple"),
+            "weights": vb.get("consensus_weights") or vb.get("blend_weights"),
         },
+        # The forward growth the model used (analyst consensus when available) —
+        # so the reviewer weighs the SAME forward-looking data, not just trailing
+        # multiples, and can judge whether a premium to today's P/E is deserved.
+        "forward_growth_rate_used": (a.get("dcf_breakdown") or {}).get("growth_rate"),
+        "growth_input_source": (a.get("dcf_breakdown") or {}).get("growth_source"),
         "piotroski_f_score_0_to_9": a.get("f_score"),
         "revenue_last_5y": a.get("revenue_5yr"),
         "free_cash_flow_last_5y": a.get("fcf_5yr"),

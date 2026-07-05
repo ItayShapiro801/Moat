@@ -71,7 +71,11 @@ interface AnalysisData {
     dcf_excluded: boolean;
     external_dcf: number | null;
     relative_value: number | null;
+    earnings_multiple?: number | null;
     blend_weights: { dcf: number; external: number; multiples: number };
+    // Actual equal weights of the sources averaged into the consensus, keyed by
+    // source name (internal_dcf | external_dcf | relative_value | earnings_multiple).
+    consensus_weights?: Record<string, number>;
     adjustments_applied: string[];
     source_mismatch_warning: boolean;
   };
@@ -397,68 +401,87 @@ export default function AnalyzePage({
             <h2 className="mb-4 text-xs font-medium uppercase tracking-widest text-moat-text-muted">
               Valuation Breakdown
             </h2>
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-              <div className="flex flex-col gap-1">
-                <span className="text-xs text-moat-text-muted">Internal DCF</span>
-                {data.valuation_breakdown.dcf_excluded ? (
-                  <>
-                    <span className="text-lg font-mono font-semibold text-moat-text-muted">
-                      Excluded (sector)
-                    </span>
-                    <span className="text-xs text-moat-text-muted">
-                      DCF not applicable
-                    </span>
-                  </>
-                ) : (
-                  <>
+            {(() => {
+              // True consensus weights (equal-weight average of included sources).
+              // Falls back to 0% for sources that weren't included.
+              const cw = data.valuation_breakdown.consensus_weights ?? {};
+              const w = (k: string) => `${((cw[k] ?? 0) * 100).toFixed(0)}%`;
+              return (
+                <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-xs text-moat-text-muted">Internal DCF</span>
+                    {data.valuation_breakdown.dcf_excluded ? (
+                      <>
+                        <span className="text-lg font-mono font-semibold text-moat-text-muted">
+                          Excluded (sector)
+                        </span>
+                        <span className="text-xs text-moat-text-muted">
+                          DCF not applicable
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-lg font-mono font-semibold text-moat-text">
+                          {data.valuation_breakdown.internal_dcf != null
+                            ? `$${data.valuation_breakdown.internal_dcf.toFixed(2)}`
+                            : "N/A"}
+                        </span>
+                        <span className="text-xs text-moat-text-muted">
+                          Weight: {w("internal_dcf")}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <span className="text-xs text-moat-text-muted">External DCF</span>
                     <span className="text-lg font-mono font-semibold text-moat-text">
-                      {data.valuation_breakdown.internal_dcf != null
-                        ? `$${data.valuation_breakdown.internal_dcf.toFixed(2)}`
+                      {data.valuation_breakdown.external_dcf != null
+                        ? `$${data.valuation_breakdown.external_dcf.toFixed(2)}`
                         : "N/A"}
                     </span>
                     <span className="text-xs text-moat-text-muted">
-                      Weight: {(data.valuation_breakdown.blend_weights.dcf * 100).toFixed(0)}%
+                      Weight: {w("external_dcf")}
+                      {data.valuation_breakdown.source_mismatch_warning && " (mismatch)"}
                     </span>
-                  </>
-                )}
-              </div>
-              <div className="flex flex-col gap-1">
-                <span className="text-xs text-moat-text-muted">External DCF</span>
-                <span className="text-lg font-mono font-semibold text-moat-text">
-                  {data.valuation_breakdown.external_dcf != null
-                    ? `$${data.valuation_breakdown.external_dcf.toFixed(2)}`
-                    : "N/A"}
-                </span>
-                <span className="text-xs text-moat-text-muted">
-                  Weight: {(data.valuation_breakdown.blend_weights.external * 100).toFixed(0)}%
-                  {data.valuation_breakdown.source_mismatch_warning && " (mismatch)"}
-                </span>
-              </div>
-              <div className="flex flex-col gap-1">
-                <span className="text-xs text-moat-text-muted">Relative Value</span>
-                <span className="text-lg font-mono font-semibold text-moat-text">
-                  {data.valuation_breakdown.relative_value != null
-                    ? `$${data.valuation_breakdown.relative_value.toFixed(2)}`
-                    : "N/A"}
-                </span>
-                <span className="text-xs text-moat-text-muted">
-                  Weight: {(data.valuation_breakdown.blend_weights.multiples * 100).toFixed(0)}%
-                </span>
-              </div>
-              <div className="flex flex-col gap-1">
-                <span className="text-xs text-moat-text-muted">Intrinsic Value</span>
-                <span className={`text-lg font-mono font-semibold ${confidenceColor[data.confidence ?? "low"]}`}>
-                  {data.intrinsic_value.consensus != null
-                    ? `$${data.intrinsic_value.consensus.toFixed(2)}`
-                    : "N/A"}
-                </span>
-                {data.valuation_breakdown.adjustments_applied.length > 0 && (
-                  <span className="text-xs text-moat-warning">
-                    {data.valuation_breakdown.adjustments_applied.join(", ")}
-                  </span>
-                )}
-              </div>
-            </div>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <span className="text-xs text-moat-text-muted">Relative Value</span>
+                    <span className="text-lg font-mono font-semibold text-moat-text">
+                      {data.valuation_breakdown.relative_value != null
+                        ? `$${data.valuation_breakdown.relative_value.toFixed(2)}`
+                        : "N/A"}
+                    </span>
+                    <span className="text-xs text-moat-text-muted">
+                      Weight: {w("relative_value")}
+                    </span>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <span className="text-xs text-moat-text-muted">Earnings Multiple</span>
+                    <span className="text-lg font-mono font-semibold text-moat-text">
+                      {data.valuation_breakdown.earnings_multiple != null
+                        ? `$${data.valuation_breakdown.earnings_multiple.toFixed(2)}`
+                        : "N/A"}
+                    </span>
+                    <span className="text-xs text-moat-text-muted">
+                      Weight: {w("earnings_multiple")}
+                    </span>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <span className="text-xs text-moat-text-muted">Intrinsic Value</span>
+                    <span className={`text-lg font-mono font-semibold ${confidenceColor[data.confidence ?? "low"]}`}>
+                      {data.intrinsic_value.consensus != null
+                        ? `$${data.intrinsic_value.consensus.toFixed(2)}`
+                        : "N/A"}
+                    </span>
+                    {data.valuation_breakdown.adjustments_applied.length > 0 && (
+                      <span className="text-xs text-moat-warning">
+                        {data.valuation_breakdown.adjustments_applied.join(", ")}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
           </Card>
 
           {/* AI second opinion on the quantitative valuation */}

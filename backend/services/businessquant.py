@@ -101,9 +101,16 @@ _MISS_TTL = 6 * 3600     # cache "no data / capped" briefly so we don't re-probe
 
 
 def _next_year_growth(ticker: str, mode: str):
-    """Consensus growth (fraction) for the next fiscal year vs the latest reported
-    actual, from BusinessQuant's /estimates endpoint (mode = 'eps' | 'revenue'),
-    or None. Costs one BQ call."""
+    """Consensus TREND growth (fraction/yr) from BusinessQuant's /estimates endpoint
+    (mode = 'eps' | 'revenue'), or None. Costs one BQ call.
+
+    Uses the multi-year CAGR from the latest reported actual to the FURTHEST annual
+    forward estimate — not just next year vs last year. The single-year ratio is a
+    trap for cyclical/rebound cases: a company whose base year was depressed by
+    one-off charges shows next-year "growth" of +30-40% that is a RECOVERY, not a
+    trend, and feeding that into a DCF produced fair values ~3x the market price.
+    The CAGR across all published forward years (analysts typically publish 4+)
+    smooths the rebound into the sustainable rate."""
     data = _bq_get(f"estimates?ticker={ticker}&mode={mode}")
     if not isinstance(data, dict):
         return None
@@ -114,18 +121,30 @@ def _next_year_growth(ticker: str, mode: str):
             break
     if not ann:
         return None
-    # Latest reported actual = the anchor; first forward 'estimate' = next year.
+    # Latest reported actual = the anchor; furthest forward 'estimate' = the target.
     reported = [e for e in ann if e.get("data_type") == "reported"
                 and _num(e.get("value_reported")) is not None]
     forward = [e for e in ann if e.get("data_type") == "estimate"
                and _num(e.get("value_estimate")) is not None]
     if not reported or not forward:
         return None
-    base = _num(reported[-1].get("value_reported"))
-    nxt = _num(forward[0].get("value_estimate"))
-    if not base or base <= 0 or nxt is None:
+    base_row, last_row = reported[-1], forward[-1]
+    base = _num(base_row.get("value_reported"))
+    last = _num(last_row.get("value_estimate"))
+    if not base or base <= 0 or last is None:
         return None
-    return nxt / base - 1.0
+
+    def _year(row):
+        try:
+            return int(str(row.get("period", ""))[:4])
+        except (ValueError, TypeError):
+            return None
+
+    y0, y1 = _year(base_row), _year(last_row)
+    years = (y1 - y0) if (y0 and y1 and y1 > y0) else len(forward)
+    if last <= 0:
+        return None  # projected to stay unprofitable/negative — no usable trend
+    return (last / base) ** (1.0 / max(years, 1)) - 1.0
 
 
 def forward_growth(ticker: str) -> dict:
