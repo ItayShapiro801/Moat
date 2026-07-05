@@ -90,7 +90,8 @@ from services import supabase_cache as _sb
 
 # Versioned key: bump when the valuation MODEL changes so stale pre-fix numbers in
 # the persistent cache are ignored rather than served for up to a full TTL.
-_SB_VAL_PREFIX = "valuation:v2:"
+# v3 = Moat Valuation Engine (CAP horizon, reverse DCF, Monte Carlo, ensemble).
+_SB_VAL_PREFIX = "valuation:v3:"
 
 
 # A data-limited (EDGAR-backup) valuation must NOT be cached for the full 24h:
