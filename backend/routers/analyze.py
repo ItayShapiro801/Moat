@@ -97,12 +97,20 @@ _SB_VAL_PREFIX = "valuation:v3:"
 # A data-limited (EDGAR-backup) valuation must NOT be cached for the full 24h:
 # the FMP budget may reset within hours, and holding the flagged copy all day left
 # a ticker "stuck" showing the limit banner while freshly-searched tickers around
-# it got full data. Limited entries retry after 3h instead.
+# it got full data. Limited entries retry after 3h instead. Same for valuations
+# whose growth came from the Finnhub PROXY (analyst-estimate budget was spent):
+# they're held briefly so the next visit upgrades to real estimates.
 _LIMITED_TTL = 3 * 3600
 
 
+def _is_proxy_growth(payload: dict) -> bool:
+    return ((payload or {}).get("dcf_breakdown") or {}).get("growth_provider") == "finnhub_proxy"
+
+
 def _ttl_for_payload(payload: dict) -> int:
-    return _LIMITED_TTL if (payload or {}).get("data_limited") else VALUATION_TTL
+    if (payload or {}).get("data_limited") or _is_proxy_growth(payload):
+        return _LIMITED_TTL
+    return VALUATION_TTL
 
 
 def _valuation_cache_get(ticker: str):
@@ -133,7 +141,11 @@ def _valuation_cache_get_stale(ticker: str):
 
 def _valuation_cache_set(ticker: str, payload: dict) -> None:
     _VALUATION_CACHE[ticker] = (_time.time(), payload)
-    _sb.cache_set(f"{_SB_VAL_PREFIX}{ticker}", payload, _ttl_for_payload(payload))
+    # Proxy-growth valuations stay in memory ONLY (short TTL): persisting them
+    # would serve a lower-fidelity number across restarts even after the analyst-
+    # estimate budget resets. Real-estimate valuations persist as usual.
+    if not _is_proxy_growth(payload):
+        _sb.cache_set(f"{_SB_VAL_PREFIX}{ticker}", payload, _ttl_for_payload(payload))
 
 
 # Short-TTL cache for the supporting data endpoints (/metrics, /financials,
@@ -541,6 +553,10 @@ def analyze(ticker: str):
             "terminal_growth": dcf_result["terminal_growth"],
             "growth_rate": dcf_result["growth_rate"],
             "growth_source": dcf_result["growth_source"],
+            # Which provider actually supplied the growth input: native (yfinance),
+            # businessquant (analyst consensus) or finnhub_proxy (historical trend).
+            # Proxy-based valuations get a short cache so they upgrade quickly.
+            "growth_provider": safe_get(info, "_growth_provider"),
             "sector": sector,
             "enterprise_value": dcf_result["enterprise_value"],
             "equity_value": dcf_result["equity_value"],

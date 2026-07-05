@@ -147,21 +147,42 @@ def _next_year_growth(ticker: str, mode: str):
     return (last / base) ** (1.0 / max(years, 1)) - 1.0
 
 
+_SB_GROWTH_PREFIX = "bqgrowth:"
+
+
 def forward_growth(ticker: str) -> dict:
-    """{"earningsGrowth": float|None, "revenueGrowth": float|None} — next-year
-    analyst consensus growth (fractions), cached 24h. All-None when BQ has no
-    coverage or every key is exhausted (caller then uses the Finnhub proxy)."""
+    """{"earningsGrowth": float|None, "revenueGrowth": float|None} — analyst
+    consensus trend growth (fractions), cached 24h. All-None when BQ has no
+    coverage or every key is exhausted (caller then uses the Finnhub proxy).
+
+    Two cache tiers: in-memory (fast) and Supabase (persistent). Without the
+    persistent tier, Render's free-tier restarts wiped the memory cache and every
+    wake re-spent 2 of the 30/day key budget per stock — cutting the effective
+    coverage well below the theoretical ~90 stocks/day. A fetched estimate now
+    survives restarts for its full TTL, so each stock costs its 2 calls once/day."""
     ticker = ticker.upper()
     hit = _GROWTH_CACHE.get(ticker)
     now = time.time()
     if hit and now - hit[0] < (_GROWTH_TTL if hit[1].get("_hit") else _MISS_TTL):
         return {k: v for k, v in hit[1].items() if k != "_hit"}
+    # Persistent tier (survives Render restarts). Only real hits are stored long;
+    # rehydrate memory so subsequent lookups are instant.
+    from services import supabase_cache as _sb
+    sb_val = _sb.cache_get(f"{_SB_GROWTH_PREFIX}{ticker}")
+    if isinstance(sb_val, dict) and ("earningsGrowth" in sb_val or "revenueGrowth" in sb_val):
+        got = sb_val.get("earningsGrowth") is not None or sb_val.get("revenueGrowth") is not None
+        _GROWTH_CACHE[ticker] = (now, {**sb_val, "_hit": got})
+        return {k: v for k, v in sb_val.items() if k != "_hit"}
     if not BUSINESSQUANT_API_KEYS or not _key_order():
         return {"earningsGrowth": None, "revenueGrowth": None}  # no key/budget; don't cache a miss aggressively
     eg = _next_year_growth(ticker, "eps")
     rg = _next_year_growth(ticker, "revenue")
     result = {"earningsGrowth": eg, "revenueGrowth": rg}
+    got = eg is not None or rg is not None
     # One concise line so the data source is visible in logs (BQ vs proxy fallback).
     print(f"[businessquant] {ticker}: eps={eg} rev={rg} usable_keys={len(_key_order())}", flush=True)
-    _GROWTH_CACHE[ticker] = (now, {**result, "_hit": (eg is not None or rg is not None)})
+    _GROWTH_CACHE[ticker] = (now, {**result, "_hit": got})
+    # Persist: real estimates for the full 24h; a no-coverage miss briefly (6h) so
+    # restarts don't re-burn calls probing tickers BQ doesn't cover.
+    _sb.cache_set(f"{_SB_GROWTH_PREFIX}{ticker}", result, _GROWTH_TTL if got else _MISS_TTL)
     return result

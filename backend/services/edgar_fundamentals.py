@@ -350,7 +350,8 @@ def enrich_growth(ticker: str, info: dict) -> None:
     if info is None:
         return
     if info.get("earningsGrowth") is not None or info.get("revenueGrowth") is not None:
-        return  # source already provided forward growth (e.g. yfinance) — leave it
+        info.setdefault("_growth_provider", "native")  # e.g. yfinance analyst growth
+        return  # source already provided forward growth — leave it
 
     # 2. Real analyst forward estimates from BusinessQuant (when budget remains).
     try:
@@ -361,11 +362,14 @@ def enrich_growth(ticker: str, info: dict) -> None:
         if bq.get("revenueGrowth") is not None:
             info["revenueGrowth"] = bq["revenueGrowth"]
         if info.get("earningsGrowth") is not None or info.get("revenueGrowth") is not None:
+            info["_growth_provider"] = "businessquant"
             return  # got real estimates — done
     except Exception:
         pass
 
     # 3. Finnhub historical-growth proxy (uncapped) — always-available fallback.
+    # Tagged so the valuation cache holds proxy-based results only briefly (they
+    # should be recomputed with real analyst estimates once budget returns).
     metric = _finnhub_metric(ticker)
     if not metric:
         return
@@ -375,6 +379,8 @@ def enrich_growth(ticker: str, info: dict) -> None:
         info["earningsGrowth"] = eg
     if rg is not None:
         info["revenueGrowth"] = rg
+    if eg is not None or rg is not None:
+        info["_growth_provider"] = "finnhub_proxy"
 
 
 # Finnhub's `finnhubIndustry` uses its own taxonomy; the valuation engine keys off
