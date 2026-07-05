@@ -219,7 +219,9 @@ def _is_balance_sheet_financial(info, sector) -> bool:
     highly-cash-generative business models — excluding those from the DCF (the old
     blanket sector rule) threw away the best valuation lens for them."""
     ind = (safe_get(info, "industry") or "").lower()
-    if "bank" in ind or "insur" in ind:
+    # Banks, insurers and broker-dealers/investment banks (GS/MS: "Capital
+    # Markets") — all balance-sheet businesses where OCF/FCF is noise.
+    if "bank" in ind or "insur" in ind or "capital market" in ind:
         return True
     if ind:
         return False  # a known non-bank industry (payments, credit services, ...)
