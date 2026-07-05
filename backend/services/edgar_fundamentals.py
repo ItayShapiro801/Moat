@@ -214,7 +214,7 @@ def build_edgar_bundle(ticker: str):
     balance_sheet.loc["Share Issued"] = [_num(series["_shares"].get(e)) for e in year_ends]
 
     # --- Market data (EDGAR has none): current price + sector/name + history ---
-    price, sector, name, beta, mkt_shares, metric = _market_context(ticker)
+    price, sector, name, beta, mkt_shares, metric, industry = _market_context(ticker)
     if price is None:
         return None  # can't value without a current price
     name = facts_bundle.get("name") or name or ticker
@@ -248,6 +248,7 @@ def build_edgar_bundle(ticker: str):
         "longName": name,
         "shortName": name,
         "sector": sector or "",
+        "industry": industry or "",
         "quoteType": "EQUITY",
         "currency": "USD",  # EDGAR filers report in USD
         "beta": beta or 1.0,
@@ -440,14 +441,16 @@ def _market_context(ticker: str):
     forward-ish growth rates (eps/revenue 5y) and current market multiples (P/E, P/S,
     EV/FCF) that EDGAR statements can't provide — this is what lets the EDGAR path
     produce a GOOD valuation (DCF growth + relative value) without any FMP call."""
-    price = sector = name = beta = shares = None
+    price = sector = name = beta = shares = industry = None
     metric = {}
     try:
         from services import finnhub_fallback as FH
         price = FH._quote_price(ticker)
         prof = FH._get(f"stock/profile2?symbol={ticker}")
         if isinstance(prof, dict):
-            sector = _map_sector(prof.get("finnhubIndustry"))
+            industry = prof.get("finnhubIndustry")  # raw (e.g. "Banking") — used to
+            # distinguish balance-sheet financials from payment networks downstream
+            sector = _map_sector(industry)
             name = prof.get("name")
             # Finnhub reports shareOutstanding in MILLIONS.
             so = _num(prof.get("shareOutstanding"))
@@ -462,7 +465,7 @@ def _market_context(ticker: str):
         price = _num(q.get("price"))
         name = name or q.get("name")
         shares = shares or _num(q.get("sharesOutstanding"))
-    return price, sector, name, beta, shares, metric
+    return price, sector, name, beta, shares, metric, industry
 
 
 def _historical_prices(ticker: str):

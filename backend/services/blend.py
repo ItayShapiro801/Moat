@@ -39,7 +39,8 @@ def detect_cyclical(fcf_5yr):
 
 def compute_blended_valuation(
     internal_dcf_result, external_dcf_val, relative_val,
-    sector, current_price, fcf_5yr, info, stock, low_confidence_valuation=False
+    sector, current_price, fcf_5yr, info, stock, low_confidence_valuation=False,
+    is_financial=None,
 ):
     # `low_confidence_valuation` is set when the multi-year multiples were deemed
     # unreliable (a detected merger, or a result wildly out of line with price)
@@ -50,8 +51,11 @@ def compute_blended_valuation(
     internal_fv = internal_dcf_result["fair_value"] if internal_dcf_result["meaningful"] else None
     ext_fv = external_dcf_val
 
-    # --- Sector Exclusion (financials) ---
-    is_financial = sector in FINANCIAL_SECTORS
+    # --- Sector Exclusion (balance-sheet financials) ---
+    # Caller passes an industry-aware flag (banks/insurers only — payment networks
+    # like Visa keep their DCF); fall back to the blunt sector test if not given.
+    if is_financial is None:
+        is_financial = sector in FINANCIAL_SECTORS
     if is_financial:
         adjustments.append("sector_excluded_dcf")
         internal_fv = None

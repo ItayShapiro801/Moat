@@ -209,6 +209,23 @@ def _locked_cache(ckey: str, producer):
         return producer()
 
 
+def _is_balance_sheet_financial(info, sector) -> bool:
+    """True for banks/insurers — companies whose 'FCF' is meaningless because
+    deposits/float flow through operating cash flow, so the engine values them on
+    excess returns (justified P/B) instead of a DCF.
+
+    Deliberately INDUSTRY-based, not sector-based: the 'Financial Services' sector
+    also contains payment networks (Visa/Mastercard) and exchanges with pristine,
+    highly-cash-generative business models — excluding those from the DCF (the old
+    blanket sector rule) threw away the best valuation lens for them."""
+    ind = (safe_get(info, "industry") or "").lower()
+    if "bank" in ind or "insur" in ind:
+        return True
+    if ind:
+        return False  # a known non-bank industry (payments, credit services, ...)
+    return sector in FINANCIAL_SECTORS  # industry unknown: conservative default
+
+
 def _resolve_market_data(ticker: str):
     """Acquire data for the FULL valuation engine, trying providers in order and
     returning (stock_like, info, source).
@@ -342,6 +359,9 @@ def analyze(ticker: str):
     # FCF; the engine then supersedes its flat 5-year projection with the moat-
     # driven CAP model (fading growth over a quality-dependent horizon), a reverse
     # DCF (market-implied growth) and a Monte Carlo fair-value distribution.
+    # Balance-sheet financials (banks/insurers — NOT payment networks like Visa)
+    # get the excess-return (justified P/B) model instead of an FCF DCF.
+    bank_mode = _is_balance_sheet_financial(info, sector)
     legacy_dcf = compute_internal_dcf(info, fcf_5yr, sector, revenue_5yr)
     f_score_early = compute_piotroski(financials, balance_sheet, cashflow, info)
     dcf_result = run_valuation_engine(
@@ -350,6 +370,7 @@ def analyze(ticker: str):
         base_fcf=legacy_dcf.get("base_fcf"),
         growth_rate=legacy_dcf.get("growth_rate"),
         growth_source=legacy_dcf.get("growth_source"),
+        bank_mode=bank_mode,
     )
 
     # 2. External DCF
@@ -369,15 +390,19 @@ def analyze(ticker: str):
     # 4-7. Blend (still used for adjustments + source mismatch detection)
     blend = compute_blended_valuation(
         dcf_result, ext_dcf, rel_val,
-        sector, current_price, fcf_5yr, info, stock, low_confidence_valuation=valuation_unreliable
+        sector, current_price, fcf_5yr, info, stock,
+        low_confidence_valuation=valuation_unreliable, is_financial=bank_mode
     )
 
     scenarios = dcf_result["scenarios"]
     base_value = scenarios["base"]["value"]
-    is_financial = sector in FINANCIAL_SECTORS
+    is_financial = bank_mode  # industry-aware: banks/insurers only, not payments
+    engine_meta = dcf_result.get("engine") or {}
+    dcf_reliable = engine_meta.get("dcf_reliable", True)
 
-    # Consensus = average of [base_dcf, external_dcf (if usable), relative_value].
-    # How much we trust the INTERNAL DCF depends on its growth input:
+    # Consensus = weighted ensemble of [internal model, external DCF, relative
+    # value, earnings multiple]. How much we trust the INTERNAL model depends on
+    # its growth input:
     #   - forward_* (analyst estimates)     -> reliable; always include.
     #   - historical_revenue_cagr           -> reliable enough; include even when an
     #     external DCF exists (it uses the business's revenue trajectory + a
@@ -385,13 +410,15 @@ def analyze(ticker: str):
     #   - historical_cagr (raw FCF CAGR)    -> weak; keep the prior behavior of
     #     deferring to a forward-looking external DCF when one is available, since
     #     FCF CAGR badly undervalues companies mid capex-cycle.
+    # Banks/insurers are included too — their internal model is the excess-return
+    # (justified P/B) valuation, the correct lens for balance-sheet financials.
     growth_source = str(dcf_result.get("growth_source", ""))
     dcf_is_forward = growth_source.startswith("forward")
     dcf_is_business = dcf_is_forward or growth_source == "historical_revenue_cagr"
     has_external = bool(ext_dcf and ext_dcf > 0)
     internal_reliable = (
-        base_value and base_value > 0 and not is_financial
-        and (dcf_is_business or not has_external)
+        base_value and base_value > 0
+        and (dcf_is_business or not has_external or bank_mode)
     )
     # Labeled sources so the UI's Valuation Breakdown shows EXACTLY what went into
     # the consensus and at what weight — previously the earnings anchor was a hidden
@@ -422,7 +449,8 @@ def analyze(ticker: str):
     # real forward estimate; the earnings anchor with earnings stability. These
     # are the ACTUAL weights of the consensus, surfaced to the UI.
     consensus_weights = ensemble_weights(
-        consensus_sources, fcf_5yr, revenue_5yr, info, growth_source
+        consensus_sources, fcf_5yr, revenue_5yr, info, growth_source,
+        dcf_reliable=dcf_reliable or bank_mode,
     ) if consensus_sources else {}
     consensus = (
         round(sum(v * consensus_weights.get(label, 0) for label, v in consensus_sources), 2)
@@ -512,6 +540,15 @@ def analyze(ticker: str):
 
     f_score = f_score_early  # computed above as a moat-score input
 
+    # Banks/insurers now HAVE an internal model (excess return / justified P/B),
+    # so the old "Excluded (sector)" state only remains when even that model
+    # couldn't be computed (e.g. negative equity).
+    if bank_mode and dcf_result["meaningful"]:
+        blend["adjustments_applied"] = [
+            a for a in blend["adjustments_applied"] if a != "sector_excluded_dcf"
+        ]
+        if "excess_return_model" not in blend["adjustments_applied"]:
+            blend["adjustments_applied"].append("excess_return_model")
     dcf_excluded = "sector_excluded_dcf" in blend["adjustments_applied"]
 
     payload = {

@@ -145,6 +145,36 @@ def _first(data):
     return None
 
 
+def _cross_validate_price(ticker: str, price, quote: dict):
+    """Guard against a stale FMP quote by cross-checking Finnhub (free, live feed).
+
+    Observed in production: FMP's free-tier quote for MU was months stale ($166 vs
+    the real $975 after a huge run-up), which silently poisoned every downstream
+    number (P/E, margin of safety, the whole valuation). When the two feeds
+    disagree by >25%, prefer the one with the FRESHER exchange timestamp; if
+    timestamps aren't comparable, prefer Finnhub (it matched the live market in
+    the observed failure). Agreeing feeds (the normal case) return FMP's price."""
+    if not price:
+        return price
+    try:
+        from services import finnhub_fallback as FH
+        q = FH._get(f"quote?symbol={ticker}") or {}
+        fh_price = _num(q.get("c"))
+        fh_ts = _num(q.get("t"))
+    except Exception:
+        return price
+    if not fh_price or fh_price <= 0:
+        return price
+    if abs(price - fh_price) / max(price, fh_price) <= 0.25:
+        return price  # feeds agree — normal case
+    fmp_ts = _num(quote.get("timestamp"))
+    print(f"[price-check] {ticker}: FMP={price} vs Finnhub={fh_price} diverge >25%; "
+          f"using {'fresher' if (fh_ts and fmp_ts) else 'Finnhub'} quote", flush=True)
+    if fh_ts and fmp_ts:
+        return fh_price if fh_ts >= fmp_ts else price
+    return fh_price
+
+
 def _num(v):
     """Coerce to float or None (FMP sometimes returns "", 0, or missing keys)."""
     try:
@@ -447,6 +477,7 @@ def build_fmp_bundle(ticker: str):
     cf = cf if isinstance(cf, list) else []
 
     price = _num(quote.get("price")) or _num(profile.get("price"))
+    price = _cross_validate_price(ticker, price, quote)
     if price is None or not inc:
         return None  # without a price and statements there's no full valuation
 

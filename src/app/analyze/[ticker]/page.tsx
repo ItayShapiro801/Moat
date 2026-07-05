@@ -92,6 +92,7 @@ interface AnalysisData {
   // Moat Valuation Engine: quality-driven CAP horizon, reverse-DCF implied
   // growth, and a Monte Carlo fair-value distribution.
   valuation_engine?: {
+    method?: "fcf_dcf" | "excess_return";
     moat_score: number;
     moat_components?: Record<string, number>;
     cap_years: number;
@@ -120,6 +121,18 @@ const confidenceColor = {
   medium: "text-moat-warning",
   low: "text-moat-danger",
 };
+
+// Human-readable labels for the model-adjustment codes the backend reports —
+// raw snake_case internals (e.g. "cyclical_avg_fcf") look broken to visitors.
+const ADJUSTMENT_LABELS: Record<string, string> = {
+  sector_excluded_dcf: "DCF not applicable for this sector",
+  excess_return_model: "valued on excess returns (justified P/B)",
+  cyclical_avg_fcf: "cyclical cash flow — multi-year average used",
+  hyper_capex: "capex surge normalized",
+  multiples_unreliable: "historical multiples de-emphasized",
+};
+const adjustmentLabel = (code: string) =>
+  ADJUSTMENT_LABELS[code] ?? code.replace(/_/g, " ");
 
 export default function AnalyzePage({
   params,
@@ -421,14 +434,18 @@ export default function AnalyzePage({
               return (
                 <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
                   <div className="flex flex-col gap-1">
-                    <span className="text-xs text-moat-text-muted">Internal DCF</span>
+                    <span className="text-xs text-moat-text-muted">
+                      {data.valuation_engine?.method === "excess_return"
+                        ? "Excess-Return Model"
+                        : "Internal DCF"}
+                    </span>
                     {data.valuation_breakdown.dcf_excluded ? (
                       <>
                         <span className="text-lg font-mono font-semibold text-moat-text-muted">
-                          Excluded (sector)
+                          Not applicable
                         </span>
                         <span className="text-xs text-moat-text-muted">
-                          DCF not applicable
+                          model unavailable for this company
                         </span>
                       </>
                     ) : (
@@ -453,7 +470,8 @@ export default function AnalyzePage({
                     </span>
                     <span className="text-xs text-moat-text-muted">
                       Weight: {w("external_dcf")}
-                      {data.valuation_breakdown.source_mismatch_warning && " (mismatch)"}
+                      {data.valuation_breakdown.source_mismatch_warning &&
+                        " · outlier — excluded"}
                     </span>
                   </div>
                   <div className="flex flex-col gap-1">
@@ -487,7 +505,9 @@ export default function AnalyzePage({
                     </span>
                     {data.valuation_breakdown.adjustments_applied.length > 0 && (
                       <span className="text-xs text-moat-warning">
-                        {data.valuation_breakdown.adjustments_applied.join(", ")}
+                        {data.valuation_breakdown.adjustments_applied
+                          .map(adjustmentLabel)
+                          .join(" · ")}
                       </span>
                     )}
                   </div>
@@ -563,7 +583,9 @@ export default function AnalyzePage({
                     })()
                   ) : (
                     <span className="text-sm text-moat-text-muted">
-                      Not solvable for this company (cash-flow profile out of range).
+                      {data.valuation_engine.method === "excess_return"
+                        ? "Financials are valued on excess returns (ROE vs cost of equity), so a cash-flow reverse DCF doesn't apply."
+                        : "Not solvable for this company (cash-flow profile out of range)."}
                     </span>
                   )}
                 </div>

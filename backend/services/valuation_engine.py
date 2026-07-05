@@ -199,11 +199,44 @@ def monte_carlo(base_fcf, g0, wacc, tgr, years, decay, net_debt, shares, seed=42
 # ---------------------------------------------------------------------------
 
 
+def _bank_excess_return_value(info, financials, balance_sheet, growth_rate, ke):
+    """Fair value per share for balance-sheet financials (banks, insurers) via the
+    justified price-to-book model: P/B* = (ROE - g) / (Ke - g), value = P/B* x BVPS.
+
+    A free-cash-flow DCF is meaningless for a bank — deposits and float flow
+    through operating cash flow, so 'FCF' is noise. The standard analyst tool is
+    the excess-return framework: a bank earning its cost of equity is worth book
+    value; every point of ROE above Ke earns a premium to book. Derived from the
+    Gordon model on residual income; clamped so an extreme ROE year can't print a
+    silly multiple. Returns (value_per_share|None, justified_pb|None, roe|None)."""
+    ni = _series_from(financials, "Net Income")
+    eq = _series_from(balance_sheet, "Stockholders Equity")
+    shares = safe_get(info, "sharesOutstanding", 0)
+    if not ni or not eq or not shares or not eq[0] or eq[0] <= 0:
+        return None, None, None
+    # Average ROE over up to 3 years — one hot/cold year shouldn't set the multiple.
+    roes = [n / e for n, e in zip(ni[:3], eq[:3]) if e and e > 0]
+    if not roes:
+        return None, None, None
+    roe = statistics.median(roes)
+    if roe <= 0:
+        return None, None, roe
+    g = max(0.0, min(growth_rate if growth_rate is not None else 0.04, roe * 0.6, 0.06))
+    if ke <= g:
+        ke = g + 0.02
+    pb = (roe - g) / (ke - g)
+    pb = max(0.5, min(pb, 3.5))
+    bvps = eq[0] / shares
+    return round(pb * bvps, 2), round(pb, 2), round(roe, 4)
+
+
 def run_valuation_engine(info, financials, balance_sheet, cashflow,
                          fcf_5yr, revenue_5yr, sector, f_score, current_price,
-                         base_fcf, growth_rate, growth_source):
+                         base_fcf, growth_rate, growth_source, bank_mode=False):
     """Full engine run. Returns a dict shape-compatible with compute_internal_dcf
-    (so blend/guards/payload keep working) plus an `engine` block."""
+    (so blend/guards/payload keep working) plus an `engine` block.
+    bank_mode swaps the FCF DCF for the excess-return (justified P/B) model —
+    the correct lens for balance-sheet financials."""
     beta = safe_get(info, "beta", 1.0)
     shares = safe_get(info, "sharesOutstanding", 0)
     net_debt = safe_get(info, "totalDebt", 0) - safe_get(info, "totalCash", 0)
@@ -222,9 +255,39 @@ def run_valuation_engine(info, financials, balance_sheet, cashflow,
 
     g0 = max(-0.15, min(growth_rate if growth_rate is not None else 0.0, 0.25))
 
-    fv, ev, eq = fading_dcf(base_fcf, g0, wacc, tgr, years, decay, net_debt, shares)
-    mc = monte_carlo(base_fcf, g0, wacc, tgr, years, decay, net_debt, shares)
-    implied = reverse_dcf(current_price, base_fcf, wacc, tgr, years, decay, net_debt, shares)
+    if bank_mode:
+        # Balance-sheet financial: FCF is meaningless (deposits/float flow through
+        # OCF), so value on excess returns instead — justified P/B x book value.
+        bank_fv, bank_pb, bank_roe = _bank_excess_return_value(
+            info, financials, balance_sheet, g0, wacc
+        )
+        fv = bank_fv or 0.0
+        ev = eq = round((bank_fv or 0) * shares) if shares else 0
+        # Uncertainty band from the same model over sampled ROE/Ke/g.
+        mc = None
+        if bank_fv:
+            rng = random.Random(42)
+            vals = []
+            for _ in range(_MC_PATHS):
+                jitter_info = info  # ROE jitter handled via growth/ke sampling below
+                v, _pb, _r = _bank_excess_return_value(
+                    jitter_info, financials, balance_sheet,
+                    max(0.0, rng.gauss(g0, 0.015)),
+                    max(0.06, rng.gauss(wacc, 0.01)),
+                )
+                if v and v > 0:
+                    vals.append(v * max(0.7, rng.gauss(1.0, 0.06)))
+            if len(vals) >= _MC_PATHS // 2:
+                vals.sort()
+                p = lambda q: round(vals[min(len(vals) - 1, int(q / 100 * len(vals)))], 2)
+                mc = {"p10": p(10), "p25": p(25), "p50": p(50), "p75": p(75), "p90": p(90)}
+        implied = None  # reverse FCF-DCF doesn't apply to banks
+        method = "excess_return"
+    else:
+        fv, ev, eq = fading_dcf(base_fcf, g0, wacc, tgr, years, decay, net_debt, shares)
+        mc = monte_carlo(base_fcf, g0, wacc, tgr, years, decay, net_debt, shares)
+        implied = reverse_dcf(current_price, base_fcf, wacc, tgr, years, decay, net_debt, shares)
+        method = "fcf_dcf"
 
     # Scenarios from the Monte Carlo distribution (honest percentiles, not three
     # hand-tuned parameter sets). Falls back to the point estimate if MC failed.
@@ -252,7 +315,8 @@ def run_valuation_engine(info, financials, balance_sheet, cashflow,
         }
         fair_value = round(fv, 2) if fv > 0 else 0
 
-    meaningful = bool(fair_value and fair_value > 0 and base_fcf and base_fcf > 0)
+    meaningful = bool(fair_value and fair_value > 0
+                      and (bank_mode or (base_fcf and base_fcf > 0)))
 
     # Is the FCF-DCF lens even the right tool for this company? When the DCF's own
     # answer lands wildly away from the price (thin/volatile FCF — AMZN-style), the
@@ -277,6 +341,7 @@ def run_valuation_engine(info, financials, balance_sheet, cashflow,
         "meaningful": meaningful,
         # ---- engine block (new) ----
         "engine": {
+            "method": method,  # "fcf_dcf" | "excess_return" (banks/insurers)
             "moat_score": moat,
             "moat_components": moat_parts,
             "cap_years": years,
@@ -294,11 +359,15 @@ def run_valuation_engine(info, financials, balance_sheet, cashflow,
 # ---------------------------------------------------------------------------
 
 
-def ensemble_weights(sources, fcf_5yr, revenue_5yr, info, growth_source):
+def ensemble_weights(sources, fcf_5yr, revenue_5yr, info, growth_source,
+                     dcf_reliable=True):
     """{label: weight} for the consensus, from measurable reliability diagnostics
     instead of blind equal averaging:
       - moat_dcf gets more weight the cleaner the FCF record (positive years) and
-        when its growth input is a real forward estimate;
+        when its growth input is a real forward estimate; when the engine itself
+        flags the DCF unreliable (thin/cyclical FCF, value far from price — MU,
+        AMZN), it is dropped to a token weight so a $52 DCF can't drag a $975
+        stock's consensus;
       - earnings_multiple gets more weight the more stable the earnings;
       - relative_value / external_dcf carry fixed moderate weights.
     `sources` is the list of (label, value) actually available; weights renormalize
@@ -310,6 +379,8 @@ def ensemble_weights(sources, fcf_5yr, revenue_5yr, info, growth_source):
         fcf_quality = pos_years / max(len(fcf_5yr or []), 1)
         forward = 1.0 if str(growth_source).startswith("forward") else 0.7
         raw["internal_dcf"] = (0.25 + 0.35 * fcf_quality) * forward
+        if not dcf_reliable:
+            raw["internal_dcf"] = 0.05  # wrong lens for this company — token weight
     if "earnings_multiple" in labels:
         eps = safe_get(info, "trailingEps")
         raw["earnings_multiple"] = 0.35 if (eps and eps > 0) else 0.15
