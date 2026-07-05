@@ -17,6 +17,7 @@ from config import FINANCIAL_SECTORS
 from utils import *
 from services.piotroski import compute_piotroski
 from services.dcf import compute_internal_dcf, fetch_external_dcf, compute_earnings_multiple_value
+from services.valuation_engine import run_valuation_engine, ensemble_weights
 from services.relative_value import detect_reorganization, compute_relative_value
 from services.blend import compute_blended_valuation
 from services import fmp_fallback as fmp
@@ -92,9 +93,20 @@ from services import supabase_cache as _sb
 _SB_VAL_PREFIX = "valuation:v2:"
 
 
+# A data-limited (EDGAR-backup) valuation must NOT be cached for the full 24h:
+# the FMP budget may reset within hours, and holding the flagged copy all day left
+# a ticker "stuck" showing the limit banner while freshly-searched tickers around
+# it got full data. Limited entries retry after 3h instead.
+_LIMITED_TTL = 3 * 3600
+
+
+def _ttl_for_payload(payload: dict) -> int:
+    return _LIMITED_TTL if (payload or {}).get("data_limited") else VALUATION_TTL
+
+
 def _valuation_cache_get(ticker: str):
     entry = _VALUATION_CACHE.get(ticker)
-    if entry and (_time.time() - entry[0]) < VALUATION_TTL:
+    if entry and (_time.time() - entry[0]) < _ttl_for_payload(entry[1]):
         # Statements/valuation are cached 24h, but refresh the price so the headline
         # quote (and margin of safety) stay live rather than up to a day stale.
         return _with_fresh_price(entry[1])
@@ -120,7 +132,7 @@ def _valuation_cache_get_stale(ticker: str):
 
 def _valuation_cache_set(ticker: str, payload: dict) -> None:
     _VALUATION_CACHE[ticker] = (_time.time(), payload)
-    _sb.cache_set(f"{_SB_VAL_PREFIX}{ticker}", payload, VALUATION_TTL)
+    _sb.cache_set(f"{_SB_VAL_PREFIX}{ticker}", payload, _ttl_for_payload(payload))
 
 
 # Short-TTL cache for the supporting data endpoints (/metrics, /financials,
@@ -311,8 +323,21 @@ def analyze(ticker: str):
     fcf_5yr_raw = _fcf_list(cashflow, 5)
     fcf_5yr = [int(v) for v in fcf_5yr_raw][::-1] if fcf_5yr_raw else []
 
-    # 1. Internal DCF
-    dcf_result = compute_internal_dcf(info, fcf_5yr, sector, revenue_5yr)
+    # 1. Internal DCF -> Moat Valuation Engine.
+    # The legacy compute_internal_dcf still derives the growth input (forward
+    # analyst estimate -> revenue CAGR -> FCF CAGR) and the capex-normalized base
+    # FCF; the engine then supersedes its flat 5-year projection with the moat-
+    # driven CAP model (fading growth over a quality-dependent horizon), a reverse
+    # DCF (market-implied growth) and a Monte Carlo fair-value distribution.
+    legacy_dcf = compute_internal_dcf(info, fcf_5yr, sector, revenue_5yr)
+    f_score_early = compute_piotroski(financials, balance_sheet, cashflow, info)
+    dcf_result = run_valuation_engine(
+        info, financials, balance_sheet, cashflow,
+        fcf_5yr, revenue_5yr, sector, f_score_early, current_price,
+        base_fcf=legacy_dcf.get("base_fcf"),
+        growth_rate=legacy_dcf.get("growth_rate"),
+        growth_source=legacy_dcf.get("growth_source"),
+    )
 
     # 2. External DCF
     ext_dcf = fetch_external_dcf(ticker)
@@ -379,15 +404,16 @@ def analyze(ticker: str):
     if earn_mult and earn_mult > 0:
         consensus_sources.append(("earnings_multiple", earn_mult))
 
+    # Diagnostic-weighted ensemble (not a blind equal average): the DCF's weight
+    # scales with how clean the FCF record is and whether its growth input is a
+    # real forward estimate; the earnings anchor with earnings stability. These
+    # are the ACTUAL weights of the consensus, surfaced to the UI.
+    consensus_weights = ensemble_weights(
+        consensus_sources, fcf_5yr, revenue_5yr, info, growth_source
+    ) if consensus_sources else {}
     consensus = (
-        round(sum(v for _, v in consensus_sources) / len(consensus_sources), 2)
+        round(sum(v * consensus_weights.get(label, 0) for label, v in consensus_sources), 2)
         if consensus_sources else None
-    )
-    # Equal weights across included sources — this is the ACTUAL math of the
-    # consensus, surfaced so the UI can display truthful per-source weights.
-    consensus_weights = (
-        {label: round(1 / len(consensus_sources), 4) for label, _ in consensus_sources}
-        if consensus_sources else {}
     )
 
     # Fix 1: Consensus consistency. If ALL DCF scenarios are N/A but a consensus
@@ -436,6 +462,15 @@ def analyze(ticker: str):
     if (dcf_absurd or consensus_absurd) and blend["confidence"] in ("high", "medium"):
         blend["confidence"] = "low"
 
+    # A consensus that disagrees with the market by more than ~35% can be RIGHT —
+    # that's what a value screen is for — but it should never wear a green "high
+    # confidence" badge: the market is a real prior, and a big divergence deserves
+    # epistemic humility (the AI second opinion carries the counter-analysis).
+    if (consensus and current_price
+            and (consensus < 0.65 * current_price or consensus > 1.55 * current_price)
+            and blend["confidence"] == "high"):
+        blend["confidence"] = "medium"
+
     # Margin of safety anchored to the consensus (Intrinsic Value), which is the
     # single headline number shown in the UI.
     anchor = consensus
@@ -462,7 +497,7 @@ def analyze(ticker: str):
             "estimate is forward-anchored and low-confidence."
         )
 
-    f_score = compute_piotroski(financials, balance_sheet, cashflow, info)
+    f_score = f_score_early  # computed above as a moat-score input
 
     dcf_excluded = "sector_excluded_dcf" in blend["adjustments_applied"]
 
@@ -510,19 +545,22 @@ def analyze(ticker: str):
             "equity_value": dcf_result["equity_value"],
             "net_debt": round(safe_get(info, "totalDebt", 0) - safe_get(info, "totalCash", 0)),
         },
+        # Moat Valuation Engine output: moat score & components, CAP horizon,
+        # market-implied vs expected growth (reverse DCF), Monte Carlo band.
+        "valuation_engine": dcf_result.get("engine"),
         # When yfinance served this, the field is absent (matches prior behavior);
         # for FMP-sourced full valuations it records the primary source.
         **({"data_source": source} if source != "yfinance" else {}),
         # Backup mode: EDGAR+Finnhub only runs once the FMP daily budget is spent.
-        # It's a good estimate but lacks analyst forward estimates, so flag it so the
-        # UI can be honest ("live data limit reached — estimate from SEC filings")
-        # rather than presenting a backup number as if it were the primary feed.
+        # Still a full valuation (statements from SEC filings, analyst estimates
+        # from the estimates provider when its budget allows), but flagged so the
+        # UI is honest that the primary market-data feed is rate-limited.
         **({
             "data_limited": True,
             "data_limited_note": (
                 "Live market-data limit reached for today. This estimate is built "
-                "from SEC filings (EDGAR) and may be less precise than usual — it "
-                "lacks analyst forward estimates. Full data resumes tomorrow."
+                "from SEC filings (EDGAR) and may be slightly less precise than "
+                "usual. Full data resumes tomorrow."
             ),
         } if source == "edgar" else {}),
     }

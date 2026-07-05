@@ -166,6 +166,15 @@ def _generate_valuation_review(ticker: str):
         # multiples, and can judge whether a premium to today's P/E is deserved.
         "forward_growth_rate_used": (a.get("dcf_breakdown") or {}).get("growth_rate"),
         "growth_input_source": (a.get("dcf_breakdown") or {}).get("growth_source"),
+        # Moat-engine context: quality score, growth runway, and the reverse-DCF
+        # spread (growth the market price implies vs the analyst trend) — the
+        # model's core mispricing argument, for the reviewer to confirm or rebut.
+        "moat_engine": {
+            "moat_score_0_to_100": (a.get("valuation_engine") or {}).get("moat_score"),
+            "growth_runway_years": (a.get("valuation_engine") or {}).get("cap_years"),
+            "market_implied_growth": (a.get("valuation_engine") or {}).get("implied_growth"),
+            "analyst_trend_growth": (a.get("valuation_engine") or {}).get("expected_growth"),
+        },
         "piotroski_f_score_0_to_9": a.get("f_score"),
         "revenue_last_5y": a.get("revenue_5yr"),
         "free_cash_flow_last_5y": a.get("fcf_5yr"),

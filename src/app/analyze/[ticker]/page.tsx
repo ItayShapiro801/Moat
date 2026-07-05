@@ -89,6 +89,18 @@ interface AnalysisData {
     equity_value: number;
     net_debt: number;
   };
+  // Moat Valuation Engine: quality-driven CAP horizon, reverse-DCF implied
+  // growth, and a Monte Carlo fair-value distribution.
+  valuation_engine?: {
+    moat_score: number;
+    moat_components?: Record<string, number>;
+    cap_years: number;
+    growth_decay?: number;
+    expected_growth: number | null;
+    implied_growth: number | null;
+    monte_carlo: { p10: number; p25: number; p50: number; p75: number; p90: number } | null;
+    dcf_reliable?: boolean;
+  } | null;
 }
 
 interface MetricsValuation {
@@ -483,6 +495,136 @@ export default function AnalyzePage({
               );
             })()}
           </Card>
+
+          {/* Moat Valuation Engine — quality-driven CAP, reverse DCF, Monte Carlo */}
+          {data.valuation_engine && (
+            <Card>
+              <div className="mb-4 flex items-baseline justify-between flex-wrap gap-2">
+                <h2 className="text-xs font-medium uppercase tracking-widest text-moat-text-muted">
+                  Moat Valuation Engine
+                </h2>
+                <span className="text-xs text-moat-text-muted">
+                  quality-adjusted DCF · reverse DCF · {data.valuation_engine.monte_carlo ? "1,000-path Monte Carlo" : "scenario model"}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+                {/* Moat score + growth runway */}
+                <div className="flex flex-col gap-2">
+                  <span className="text-xs text-moat-text-muted">Moat Score</span>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-3xl font-mono font-semibold text-moat-text">
+                      {data.valuation_engine.moat_score.toFixed(0)}
+                    </span>
+                    <span className="text-xs text-moat-text-muted">/ 100</span>
+                  </div>
+                  <div className="h-1.5 w-full rounded-full bg-moat-border">
+                    <div
+                      className="h-1.5 rounded-full bg-moat-accent"
+                      style={{ width: `${Math.min(data.valuation_engine.moat_score, 100)}%` }}
+                    />
+                  </div>
+                  <span className="text-xs text-moat-text-muted">
+                    → {data.valuation_engine.cap_years}-year growth runway (competitive advantage period)
+                  </span>
+                </div>
+
+                {/* Market-implied vs analyst growth (reverse DCF) */}
+                <div className="flex flex-col gap-2">
+                  <span className="text-xs text-moat-text-muted">Growth: market vs analysts</span>
+                  {data.valuation_engine.implied_growth != null && data.valuation_engine.expected_growth != null ? (
+                    (() => {
+                      const imp = data.valuation_engine!.implied_growth! * 100;
+                      const exp = data.valuation_engine!.expected_growth! * 100;
+                      const gap = exp - imp;
+                      const verdict =
+                        gap > 2 ? { label: "growth underpriced", cls: "text-moat-accent" }
+                        : gap < -2 ? { label: "growth richly priced", cls: "text-moat-danger" }
+                        : { label: "fairly priced", cls: "text-moat-text-muted" };
+                      return (
+                        <>
+                          <div className="flex flex-col gap-1 text-sm font-mono">
+                            <div className="flex justify-between">
+                              <span className="text-moat-text-muted">market implies</span>
+                              <span className="text-moat-text">{imp.toFixed(1)}%/yr</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-moat-text-muted">analyst trend</span>
+                              <span className="text-moat-text">{exp.toFixed(1)}%/yr</span>
+                            </div>
+                          </div>
+                          <span className={`text-xs font-medium ${verdict.cls}`}>
+                            {gap > 0 ? "+" : ""}{gap.toFixed(1)} pts → {verdict.label}
+                          </span>
+                          <span className="text-xs text-moat-text-muted">
+                            reverse DCF: the growth rate today&apos;s price implies vs the analyst consensus trend
+                          </span>
+                        </>
+                      );
+                    })()
+                  ) : (
+                    <span className="text-sm text-moat-text-muted">
+                      Not solvable for this company (cash-flow profile out of range).
+                    </span>
+                  )}
+                </div>
+
+                {/* Monte Carlo fair-value distribution */}
+                <div className="flex flex-col gap-2">
+                  <span className="text-xs text-moat-text-muted">Fair-value distribution</span>
+                  {data.valuation_engine.monte_carlo ? (
+                    (() => {
+                      const mc = data.valuation_engine!.monte_carlo!;
+                      const price = data.current_price;
+                      const lo = Math.min(mc.p10, price) * 0.92;
+                      const hi = Math.max(mc.p90, price) * 1.08;
+                      const pos = (v: number) => `${(((v - lo) / (hi - lo)) * 100).toFixed(1)}%`;
+                      const width = (a: number, b: number) =>
+                        `${(((b - a) / (hi - lo)) * 100).toFixed(1)}%`;
+                      return (
+                        <>
+                          <div className="relative mt-3 h-2 w-full rounded-full bg-moat-border">
+                            {/* P10–P90 */}
+                            <div
+                              className="absolute h-2 rounded-full bg-moat-accent-dim"
+                              style={{ left: pos(mc.p10), width: width(mc.p10, mc.p90) }}
+                            />
+                            {/* P25–P75 */}
+                            <div
+                              className="absolute h-2 rounded-full bg-moat-accent/50"
+                              style={{ left: pos(mc.p25), width: width(mc.p25, mc.p75) }}
+                            />
+                            {/* median */}
+                            <div
+                              className="absolute -top-1 h-4 w-0.5 bg-moat-accent"
+                              style={{ left: pos(mc.p50) }}
+                            />
+                            {/* current price marker */}
+                            <div
+                              className="absolute -top-1 h-4 w-0.5 bg-moat-warning"
+                              style={{ left: pos(price) }}
+                            />
+                          </div>
+                          <div className="flex justify-between text-xs font-mono text-moat-text-muted">
+                            <span>${mc.p10.toFixed(0)}</span>
+                            <span className="text-moat-text">med ${mc.p50.toFixed(0)}</span>
+                            <span>${mc.p90.toFixed(0)}</span>
+                          </div>
+                          <span className="text-xs text-moat-text-muted">
+                            <span className="text-moat-warning">▎</span> price ${price.toFixed(0)} · band = P10–P90 of 1,000 simulated DCF paths
+                          </span>
+                        </>
+                      );
+                    })()
+                  ) : (
+                    <span className="text-sm text-moat-text-muted">
+                      DCF lens unreliable here (thin/volatile free cash flow) — the
+                      consensus leans on the earnings and relative-value anchors instead.
+                    </span>
+                  )}
+                </div>
+              </div>
+            </Card>
+          )}
 
           {/* AI second opinion on the quantitative valuation */}
           <ValuationReview ticker={data.ticker} />
