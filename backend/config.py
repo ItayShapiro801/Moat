@@ -39,6 +39,7 @@ BUSINESSQUANT_API_KEYS = [
         os.getenv("BUSINESSQUANT_API_KEY_4", ""),
         os.getenv("BUSINESSQUANT_API_KEY_5", ""),
         os.getenv("BUSINESSQUANT_API_KEY_6", ""),
+        os.getenv("BUSINESSQUANT_API_KEY_7", ""),
     ) if k
 ]
 
