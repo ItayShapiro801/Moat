@@ -14,6 +14,10 @@ interface Result {
   intrinsic_value: number | null;
   margin_of_safety_pct: number | null;
   f_score: number | null;
+  // Model confidence for the valuation — critical context at the extremes, since
+  // sorting by margin of safety floats the boldest calls to the top.
+  confidence?: "high" | "medium" | "low" | null;
+  moat_score?: number | null;
 }
 
 function timeAgo(iso: string | null): string {
@@ -127,6 +131,7 @@ export default function ScreenerPage() {
                   <th className="py-2 pr-4 font-medium text-right">Price</th>
                   <th className="py-2 pr-4 font-medium text-right">Intrinsic</th>
                   <th className="py-2 pr-4 font-medium text-right">Margin</th>
+                  <th className="py-2 pr-4 font-medium text-right hidden md:table-cell">Confidence</th>
                   <th className="py-2 font-medium text-right">F-Score</th>
                 </tr>
               </thead>
@@ -157,6 +162,23 @@ export default function ScreenerPage() {
                         </Badge>
                       ) : (
                         "N/A"
+                      )}
+                    </td>
+                    <td className="py-2.5 pr-4 text-right hidden md:table-cell">
+                      {r.confidence ? (
+                        <Badge
+                          variant={
+                            r.confidence === "high"
+                              ? "success"
+                              : r.confidence === "medium"
+                              ? "warning"
+                              : "danger"
+                          }
+                        >
+                          {r.confidence}
+                        </Badge>
+                      ) : (
+                        "—"
                       )}
                     </td>
                     <td className="py-2.5 text-right font-mono text-moat-text">

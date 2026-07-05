@@ -68,6 +68,11 @@ def run():
                 "intrinsic_value": iv,
                 "margin_of_safety_pct": d.get("margin_of_safety_pct"),
                 "f_score": d.get("f_score"),
+                # Confidence matters most at the extremes: sorting by margin of
+                # safety floats the model's boldest (least certain) calls to the
+                # top, so the UI must be able to badge them.
+                "confidence": d.get("confidence"),
+                "moat_score": (d.get("valuation_engine") or {}).get("moat_score"),
             })
             ok += 1
             print(f"[{i}/{total}] {t} OK", flush=True)
