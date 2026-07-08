@@ -293,6 +293,16 @@ def analyze(ticker: str):
         if fb is not None:
             log_source("analyze", ticker, "fmp_fallback")
             return fb
+        # Last resort: a Finnhub quote-only response (free, uncapped). Critical for
+        # ETFs/indices/crypto, which EDGAR can't cover (no SEC financial statements)
+        # — without this an ETF like VT returns a hard 503 and can't even be added
+        # to a portfolio when FMP is exhausted. Valuation fields stay null; the
+        # caller/UI treats it as a price-only holding.
+        from services import finnhub_fallback as _fh
+        quote = _fh.analyze_fallback(ticker)
+        if quote is not None and quote.get("current_price"):
+            log_source("analyze", ticker, "finnhub_quote")
+            return quote
         raise HTTPException(status_code=503, detail=f"Data temporarily unavailable for {ticker}.")
 
     log_source("analyze", ticker, source)

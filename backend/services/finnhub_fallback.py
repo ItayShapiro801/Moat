@@ -55,17 +55,25 @@ def _quote_price(ticker: str):
 
 
 def analyze_fallback(ticker: str) -> dict | None:
-    """Degraded /analyze from Finnhub: price/name/sector, valuation fields null."""
+    """Degraded /analyze from Finnhub: price/name/sector, valuation fields null.
+
+    Works for ETFs/indices/crypto too (Finnhub is free & uncapped and, unlike
+    EDGAR, covers non-equities). ETFs are detected so the portfolio can add them
+    as price-only holdings even when every full-data provider is exhausted."""
     price = _quote_price(ticker)
     profile = _get(f"stock/profile2?symbol={ticker}")
     profile = profile if isinstance(profile, dict) else {}
     if price is None and not profile:
         return None
+    # Finnhub sets no clean asset-class flag; infer ETF from the profile type or a
+    # missing market-cap/industry combined with a valid quote (typical of funds).
+    ptype = str(profile.get("type") or "").upper()
+    quote_type = "ETF" if ("ETF" in ptype or "FUND" in ptype) else "EQUITY"
     return {
         "ticker": ticker,
         "company_name": profile.get("name") or ticker,
         "current_price": round(price, 2) if price is not None else None,
-        "quote_type": "EQUITY",
+        "quote_type": quote_type,
         "currency": profile.get("currency") or "USD",
         "intrinsic_value": {
             "bear": {"value": None}, "base": {"value": None},

@@ -124,10 +124,25 @@ def compute_internal_dcf(info, fcf_5yr, sector, revenue_5yr=None):
     fwd_earn = safe_get(info, "earningsGrowth")
     fwd_rev = safe_get(info, "revenueGrowth")
     growth_source = "historical_cagr"
-    if fwd_earn is not None and fwd_earn != 0 and fwd_earn > -0.20:
+    _earn_ok = fwd_earn is not None and fwd_earn != 0 and fwd_earn > -0.20
+    _rev_ok = fwd_rev is not None and fwd_rev != 0
+    if _earn_ok and _rev_ok:
+        # Both available. For a REINVESTING growth company, forward EARNINGS growth
+        # is temporarily depressed (margin/reinvestment) while REVENUE growth
+        # reflects the real trajectory — e.g. TTD: earnings +4% but revenue +19%.
+        # When revenue meaningfully outpaces earnings, blend toward revenue (a
+        # 60/40 revenue/earnings weight) so the DCF isn't anchored to a
+        # transiently-low earnings figure. Otherwise trust the earnings estimate.
+        if fwd_rev > fwd_earn + 0.05:
+            base_growth = 0.6 * fwd_rev + 0.4 * fwd_earn
+            growth_source = "forward_blended"
+        else:
+            base_growth = fwd_earn
+            growth_source = "forward_earnings"
+    elif _earn_ok:
         base_growth = fwd_earn
         growth_source = "forward_earnings"
-    elif fwd_rev is not None and fwd_rev != 0:
+    elif _rev_ok:
         base_growth = fwd_rev
         growth_source = "forward_revenue"
     elif revenue_5yr and len(revenue_5yr) >= 3 and all(v > 0 for v in revenue_5yr[-3:]):

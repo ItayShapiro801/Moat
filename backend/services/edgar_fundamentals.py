@@ -239,6 +239,24 @@ def build_edgar_bundle(ticker: str):
     opinc = series["Operating Income"].get(latest)
     market_cap = price * shares if (price and shares) else None
 
+    # --- Ratios computed from EDGAR statements (so /metrics is NOT all-N/A on the
+    # EDGAR path — previously these only came from yfinance/FMP). Finnhub's metric
+    # blob fills a couple it can't derive (P/B, EV/EBITDA when available). ---
+    cur_assets = series["Current Assets"].get(latest)
+    cur_liab = series["Current Liabilities"].get(latest)
+    total_assets = series["Total Assets"].get(latest)
+    ebitda_val = (opinc + da) if (opinc is not None and da is not None) else opinc
+    current_ratio = (cur_assets / cur_liab) if (cur_assets and cur_liab and cur_liab > 0) else None
+    profit_margin = (ni / rev) if (ni is not None and rev and rev > 0) else None
+    roa = (ni / total_assets) if (ni is not None and total_assets and total_assets > 0) else None
+    price_to_book = (price / (equity / shares)) if (equity and shares and equity > 0) else None
+    debt_to_equity = (ltd / equity * 100) if (equity and equity > 0) else None
+    ent_val = (market_cap + ltd - cash) if market_cap else None
+    ev_ebitda = (ent_val / ebitda_val) if (ent_val and ebitda_val and ebitda_val > 0) else None
+    # Finnhub fallbacks where EDGAR can't compute (e.g. TTM figures).
+    price_to_book = price_to_book or _num(metric.get("pbAnnual")) or _num(metric.get("pbQuarterly"))
+    ev_ebitda = ev_ebitda or _num(metric.get("currentEv/freeCashFlowTTM"))
+
     # 5y daily closes for the relative-value multiples (1 FMP call; optional).
     prices_df = _historical_prices(ticker)
 
@@ -275,6 +293,13 @@ def build_edgar_bundle(ticker: str):
         # step works without FMP's historical prices. Consumed by _relative_from_metric.
         "_finnhub_metric": metric,
         "trailingPE": _num(metric.get("peTTM")) or _num(metric.get("peBasicExclExtraTTM")),
+        # Ratios computed above (yfinance key names so /metrics reads them directly).
+        "currentRatio": current_ratio,
+        "profitMargins": profit_margin,
+        "returnOnAssets": roa,
+        "priceToBook": price_to_book,
+        "enterpriseToEbitda": ev_ebitda,
+        "debtToEquity": debt_to_equity,
     }
 
     stock = _FmpStock(info, financials, balance_sheet, cashflow, pd.DataFrame(), prices_df)
