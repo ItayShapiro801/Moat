@@ -223,10 +223,22 @@ def build_edgar_bundle(ticker: str):
     # Prefer the XBRL weighted-average diluted count; fall back to the market
     # provider's share count for filers whose share tag we can't resolve (e.g. Visa's
     # multi-class structure), so per-share values (DCF, EPS) don't collapse to zero.
-    shares = series["_shares"].get(latest) or mkt_shares or None
-    if not series["_shares"].get(latest) and mkt_shares:
-        # Backfill the balance-sheet share row too, so anything reading it is consistent.
-        balance_sheet.loc["Share Issued"] = [mkt_shares for _ in year_ends]
+    xbrl_shares = series["_shares"].get(latest)
+    shares = xbrl_shares or mkt_shares or None
+
+    # SCALE GUARD: some filers report share counts in a scaled unit (e.g. MCD's XBRL
+    # gives weighted-avg shares as "716.4" meaning 716.4 MILLION). Read literally,
+    # that made EPS and per-share DCF explode by ~1e6 (MCD intrinsic value showed
+    # $291 MILLION). When the market provider has a share count and the two differ by
+    # >100x, the XBRL figure is mis-scaled — trust the market provider's actual count.
+    if xbrl_shares and mkt_shares and mkt_shares > 0:
+        ratio = mkt_shares / xbrl_shares
+        if ratio > 100 or ratio < 0.01:
+            shares = mkt_shares
+
+    if shares != xbrl_shares and shares:
+        # Keep the balance-sheet share row consistent with the count we actually use.
+        balance_sheet.loc["Share Issued"] = [shares for _ in year_ends]
     equity = series["Stockholders Equity"].get(latest)
     ltd = series["Long Term Debt"].get(latest) or 0
     cash = series["_cash"].get(latest) or 0
