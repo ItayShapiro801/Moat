@@ -658,10 +658,10 @@ def analyze(ticker: str):
         **({
             "data_limited": True,
             "data_limited_note": (
-                "The primary live market-data feed is momentarily rate-limited, "
-                "so this estimate is built from SEC filings instead and may be "
-                "slightly less precise. It typically recovers within the hour — "
-                "other tickers may already show full data."
+                "Full valuation from SEC filings + live analyst estimates. The "
+                "primary market-data feed is momentarily busy, so a few secondary "
+                "figures may be slightly less precise; the live price still "
+                "refreshes automatically."
             ),
         } if source == "edgar" else {}),
     }
