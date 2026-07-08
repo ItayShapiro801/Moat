@@ -54,6 +54,45 @@ def _quote_price(ticker: str):
     return None
 
 
+def analyst_recommendation(ticker: str) -> dict | None:
+    """Real Wall-Street analyst consensus from Finnhub (free tier), or None.
+
+    Returns the latest recommendation-trend counts + a derived consensus rating:
+      {"strong_buy": 13, "buy": 23, "hold": 16, "sell": 2, "strong_sell": 0,
+       "total": 54, "consensus": "Buy", "score": 4.15, "period": "2026-07-01"}
+    score is 1 (Strong Sell) .. 5 (Strong Buy). Finnhub's free plan does NOT
+    include price targets (premium), so we report the rating consensus only —
+    accurate and matching what public sites show, unlike a fabricated target."""
+    data = _get(f"stock/recommendation?symbol={ticker}")
+    if not isinstance(data, list) or not data:
+        return None
+    r = data[0]  # most recent period, newest first
+    sb = int(r.get("strongBuy") or 0)
+    b = int(r.get("buy") or 0)
+    h = int(r.get("hold") or 0)
+    s = int(r.get("sell") or 0)
+    ss = int(r.get("strongSell") or 0)
+    total = sb + b + h + s + ss
+    if total == 0:
+        return None
+    score = (sb * 5 + b * 4 + h * 3 + s * 2 + ss * 1) / total
+    if score >= 4.5:
+        consensus = "Strong Buy"
+    elif score >= 3.5:
+        consensus = "Buy"
+    elif score >= 2.5:
+        consensus = "Hold"
+    elif score >= 1.5:
+        consensus = "Sell"
+    else:
+        consensus = "Strong Sell"
+    return {
+        "strong_buy": sb, "buy": b, "hold": h, "sell": s, "strong_sell": ss,
+        "total": total, "consensus": consensus, "score": round(score, 2),
+        "period": r.get("period"),
+    }
+
+
 def analyze_fallback(ticker: str) -> dict | None:
     """Degraded /analyze from Finnhub: price/name/sector, valuation fields null.
 

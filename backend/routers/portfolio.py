@@ -46,15 +46,34 @@ PORTFOLIO_INSIGHTS_SYSTEM = (
 
 
 
+# Well-known broad-market ETFs/index funds. Finnhub's free profile2 doesn't return
+# an asset-class flag, so a fund added while FMP was capped can get mis-stored as
+# EQUITY — which made the insights LLM wrongly flag a diversified index fund (VT) as
+# single-name "concentration risk". We correct the type server-side before analysis.
+_KNOWN_ETFS = {
+    "VT", "VTI", "VOO", "VXUS", "SPY", "QQQ", "IVV", "VEA", "VWO", "BND", "AGG",
+    "SCHB", "SCHD", "SCHX", "ITOT", "IEFA", "IEMG", "VGT", "VUG", "VTV", "VYM",
+    "DIA", "IWM", "VB", "VO", "VEU", "GLD", "SLV", "ARKK", "XLK", "XLF", "XLE",
+    "SOXX", "SMH", "JEPI", "JEPQ", "VIG", "VNQ", "TLT", "IJR", "IJH", "MGK",
+}
+
+
 @router.post("/portfolio-insights")
 def portfolio_insights(body: PortfolioInsightsBody):
     if not body.holdings:
         raise HTTPException(status_code=400, detail="No holdings provided.")
 
+    holdings = []
+    for h in body.holdings:
+        hd = h.model_dump()
+        if str(hd.get("ticker", "")).upper() in _KNOWN_ETFS and hd.get("quote_type") in (None, "", "EQUITY"):
+            hd["quote_type"] = "ETF"  # correct a mis-stored diversified fund
+        holdings.append(hd)
+
     data = {
         "total_portfolio_value": body.total_value,
         "total_gain_loss_pct": body.total_gain_loss_pct,
-        "holdings": [h.model_dump() for h in body.holdings],
+        "holdings": holdings,
     }
     user_prompt = (
         "Analyze this portfolio using ONLY the data below. Be specific to these "

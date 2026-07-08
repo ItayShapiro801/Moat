@@ -103,16 +103,20 @@ interface AnalysisData {
     dcf_reliable?: boolean;
   } | null;
   analyst_estimates?: {
-    period: string;
+    consensus: string;              // "Strong Buy" | "Buy" | "Hold" | "Sell" | "Strong Sell"
+    score: number;                  // 1..5
+    strong_buy: number;
+    buy: number;
+    hold: number;
+    sell: number;
+    strong_sell: number;
+    total_analysts: number;
+    period: string | null;
+    eps_period: string | null;
     eps_low: number | null;
     eps_base: number | null;
     eps_high: number | null;
     last_reported_eps: number | null;
-    last_year: string | null;
-    implied_price_low: number | null;
-    implied_price_base: number | null;
-    implied_price_high: number | null;
-    fair_pe: number | null;
   } | null;
 }
 
@@ -684,43 +688,62 @@ export default function AnalyzePage({
             </Card>
           )}
 
-          {/* Wall-Street analyst estimates — forward EPS consensus low/base/high */}
-          {data.analyst_estimates?.eps_base != null && (
-            <Card>
-              <div className="mb-4 flex items-baseline justify-between flex-wrap gap-2">
-                <h2 className="text-xs font-medium uppercase tracking-widest text-moat-text-muted">
-                  Analyst Estimates
-                </h2>
-                <span className="text-xs text-moat-text-muted">
-                  FY{data.analyst_estimates.period} consensus EPS · Wall Street
-                </span>
-              </div>
-              <div className="grid grid-cols-3 gap-4">
-                {([
-                  ["Bearish", data.analyst_estimates.eps_low, data.analyst_estimates.implied_price_low, "text-moat-danger"],
-                  ["Base", data.analyst_estimates.eps_base, data.analyst_estimates.implied_price_base, "text-moat-text"],
-                  ["Bullish", data.analyst_estimates.eps_high, data.analyst_estimates.implied_price_high, "text-moat-accent"],
-                ] as const).map(([label, eps, price, cls]) => (
-                  <div key={label} className="flex flex-col gap-1 text-center">
-                    <span className="text-xs uppercase tracking-wider text-moat-text-muted">{label}</span>
-                    <span className={`text-2xl font-mono font-semibold ${cls}`}>
-                      {price != null ? `$${price.toFixed(2)}` : "—"}
+          {/* Wall-Street analyst consensus — real Buy/Hold/Sell breakdown */}
+          {data.analyst_estimates?.consensus && (() => {
+            const ae = data.analyst_estimates!;
+            const consensusColor =
+              ae.score >= 3.5 ? "text-moat-accent"
+              : ae.score >= 2.5 ? "text-moat-warning"
+              : "text-moat-danger";
+            const bars: [string, number, string][] = [
+              ["Strong Buy", ae.strong_buy, "bg-moat-accent"],
+              ["Buy", ae.buy, "bg-moat-accent/60"],
+              ["Hold", ae.hold, "bg-moat-warning/70"],
+              ["Sell", ae.sell, "bg-moat-danger/60"],
+              ["Strong Sell", ae.strong_sell, "bg-moat-danger"],
+            ];
+            const max = Math.max(...bars.map((b) => b[1]), 1);
+            return (
+              <Card>
+                <div className="mb-4 flex items-baseline justify-between flex-wrap gap-2">
+                  <h2 className="text-xs font-medium uppercase tracking-widest text-moat-text-muted">
+                    Analyst Consensus
+                  </h2>
+                  <span className="text-xs text-moat-text-muted">
+                    {ae.total_analysts} analysts · Wall Street
+                  </span>
+                </div>
+                <div className="flex items-center gap-6 flex-wrap">
+                  <div className="flex flex-col">
+                    <span className={`text-3xl font-semibold ${consensusColor}`}>
+                      {ae.consensus}
                     </span>
                     <span className="text-xs text-moat-text-muted">
-                      EPS {eps != null ? `$${eps.toFixed(2)}` : "—"}
+                      rating {ae.score.toFixed(2)} / 5.0
                     </span>
                   </div>
-                ))}
-              </div>
-              <p className="mt-4 text-xs text-moat-text-muted">
-                Analyst consensus forward EPS for FY{data.analyst_estimates.period}
-                {data.analyst_estimates.last_reported_eps != null &&
-                  ` (vs $${data.analyst_estimates.last_reported_eps.toFixed(2)} reported in ${data.analyst_estimates.last_year})`}
-                , priced at a {data.analyst_estimates.fair_pe ?? "—"}× fair P/E. This is
-                Wall Street&apos;s own bear/base/bull, independent of the model&apos;s DCF.
-              </p>
-            </Card>
-          )}
+                  <div className="flex-1 min-w-[240px] flex flex-col gap-1.5">
+                    {bars.map(([label, count, color]) => (
+                      <div key={label} className="flex items-center gap-2">
+                        <span className="w-20 text-xs text-moat-text-muted text-right">{label}</span>
+                        <div className="flex-1 h-3 rounded bg-moat-border overflow-hidden">
+                          <div className={`h-3 ${color}`} style={{ width: `${(count / max) * 100}%` }} />
+                        </div>
+                        <span className="w-6 text-xs font-mono text-moat-text text-right">{count}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                {ae.eps_base != null && (
+                  <p className="mt-4 text-xs text-moat-text-muted">
+                    Forward EPS consensus (FY{ae.eps_period}): ${ae.eps_low?.toFixed(2)} – $
+                    {ae.eps_high?.toFixed(2)} (base ${ae.eps_base.toFixed(2)})
+                    {ae.last_reported_eps != null && `, vs $${ae.last_reported_eps.toFixed(2)} last reported`}.
+                  </p>
+                )}
+              </Card>
+            );
+          })()}
 
           {/* AI second opinion on the quantitative valuation */}
           <ValuationReview ticker={data.ticker} />

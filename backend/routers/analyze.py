@@ -91,7 +91,7 @@ from services import supabase_cache as _sb
 # Versioned key: bump when the valuation MODEL changes so stale pre-fix numbers in
 # the persistent cache are ignored rather than served for up to a full TTL.
 # v3 = Moat Valuation Engine (CAP horizon, reverse DCF, Monte Carlo, ensemble).
-_SB_VAL_PREFIX = "valuation:v4:"
+_SB_VAL_PREFIX = "valuation:v5:"
 
 
 # A data-limited (EDGAR-backup) valuation must NOT be cached for the full 24h:
@@ -563,29 +563,39 @@ def analyze(ticker: str):
             blend["adjustments_applied"].append("excess_return_model")
     dcf_excluded = "sector_excluded_dcf" in blend["adjustments_applied"]
 
-    # Analyst estimates section — next fiscal year's consensus forward EPS with the
-    # LOW/BASE/HIGH range, turned into an analyst-implied PRICE range via a fair P/E
-    # (the same growth-anchored multiple the earnings-model uses). This is Wall St's
-    # own bear/base/bull, distinct from the model's DCF scenarios.
+    # Analyst estimates section — REAL Wall-Street consensus from Finnhub: the
+    # Buy/Hold/Sell recommendation breakdown + a derived consensus rating. Plus the
+    # analyst forward-EPS figures from BusinessQuant (also real). Price targets are
+    # premium-gated on Finnhub's free plan, so we intentionally DON'T fabricate one
+    # (the earlier EPS×fair-PE "target" was a model number, not an analyst view, and
+    # didn't match public sources). This shows what analysts actually rate the stock.
     analyst_estimates = None
     try:
-        from services.businessquant import analyst_eps_estimates
-        est = analyst_eps_estimates(ticker)
-        if est and est.get("base"):
-            fair_pe = fair_pe_for(info, sector, dcf_result.get("growth_rate"))
-            def _imp(eps):
-                return round(eps * fair_pe, 2) if (eps and eps > 0 and fair_pe) else None
+        from services import finnhub_fallback as _fh
+        rec = _fh.analyst_recommendation(ticker)
+        eps = None
+        try:
+            from services.businessquant import analyst_eps_estimates
+            eps = analyst_eps_estimates(ticker)
+        except Exception:
+            pass
+        if rec:
             analyst_estimates = {
-                "period": est.get("period"),
-                "eps_low": est.get("low"),
-                "eps_base": est.get("base"),
-                "eps_high": est.get("high"),
-                "last_reported_eps": est.get("last_reported"),
-                "last_year": est.get("last_year"),
-                "implied_price_low": _imp(est.get("low") or est.get("base")),
-                "implied_price_base": _imp(est.get("base")),
-                "implied_price_high": _imp(est.get("high") or est.get("base")),
-                "fair_pe": round(fair_pe, 1) if fair_pe else None,
+                "consensus": rec["consensus"],       # e.g. "Buy"
+                "score": rec["score"],               # 1..5
+                "strong_buy": rec["strong_buy"],
+                "buy": rec["buy"],
+                "hold": rec["hold"],
+                "sell": rec["sell"],
+                "strong_sell": rec["strong_sell"],
+                "total_analysts": rec["total"],
+                "period": rec["period"],
+                # Real forward-EPS consensus (BusinessQuant), if available.
+                "eps_period": eps.get("period") if eps else None,
+                "eps_low": eps.get("low") if eps else None,
+                "eps_base": eps.get("base") if eps else None,
+                "eps_high": eps.get("high") if eps else None,
+                "last_reported_eps": eps.get("last_reported") if eps else None,
             }
     except Exception:
         pass
@@ -644,26 +654,15 @@ def analyze(ticker: str):
         # Wall-Street analyst forward-EPS consensus (low/base/high) + implied price
         # range — distinct from the model's own DCF scenarios.
         "analyst_estimates": analyst_estimates,
-        # When yfinance served this, the field is absent (matches prior behavior);
-        # for FMP-sourced full valuations it records the primary source.
+        # Records which provider served the full valuation (absent for yfinance,
+        # matching prior behavior). NOTE: we intentionally DON'T set data_limited
+        # for the EDGAR path anymore. On the free tier FMP is often capped, so
+        # nearly every request goes through EDGAR — and EDGAR now produces a
+        # COMPLETE valuation (SEC-filing statements + BusinessQuant analyst
+        # estimates + Finnhub price/ratios). Flagging every one as "limited" cried
+        # wolf on normal, full-quality results. The genuinely-degraded quote-only
+        # path (finnhub_fallback, handled earlier) sets its own note instead.
         **({"data_source": source} if source != "yfinance" else {}),
-        # Backup mode: EDGAR+Finnhub only runs when FMP's live keys are all
-        # momentarily rate-limited. Still a full valuation (statements from SEC
-        # filings, analyst estimates from the estimates provider when its budget
-        # allows), but flagged so the UI is honest that the primary feed is
-        # temporarily throttled — NOT "out for the day": FMP keys cool down and
-        # recover within the same day (this note previously said "resumes
-        # tomorrow", which was misleading — a ticker fetched a moment later, or
-        # any ticker with a same-day cached result, can look completely normal).
-        **({
-            "data_limited": True,
-            "data_limited_note": (
-                "Full valuation from SEC filings + live analyst estimates. The "
-                "primary market-data feed is momentarily busy, so a few secondary "
-                "figures may be slightly less precise; the live price still "
-                "refreshes automatically."
-            ),
-        } if source == "edgar" else {}),
     }
     # Cache full valuations (Part 4) regardless of source. Degraded responses
     # (handled above) are never cached, so the app recovers full data promptly.
