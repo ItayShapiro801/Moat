@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from config import FINANCIAL_SECTORS
 from utils import *
 from services.piotroski import compute_piotroski
-from services.dcf import compute_internal_dcf, fetch_external_dcf, compute_earnings_multiple_value
+from services.dcf import compute_internal_dcf, fetch_external_dcf, compute_earnings_multiple_value, fair_pe_for
 from services.valuation_engine import run_valuation_engine, ensemble_weights
 from services.relative_value import detect_reorganization, compute_relative_value
 from services.blend import compute_blended_valuation
@@ -563,6 +563,33 @@ def analyze(ticker: str):
             blend["adjustments_applied"].append("excess_return_model")
     dcf_excluded = "sector_excluded_dcf" in blend["adjustments_applied"]
 
+    # Analyst estimates section — next fiscal year's consensus forward EPS with the
+    # LOW/BASE/HIGH range, turned into an analyst-implied PRICE range via a fair P/E
+    # (the same growth-anchored multiple the earnings-model uses). This is Wall St's
+    # own bear/base/bull, distinct from the model's DCF scenarios.
+    analyst_estimates = None
+    try:
+        from services.businessquant import analyst_eps_estimates
+        est = analyst_eps_estimates(ticker)
+        if est and est.get("base"):
+            fair_pe = fair_pe_for(info, sector, dcf_result.get("growth_rate"))
+            def _imp(eps):
+                return round(eps * fair_pe, 2) if (eps and eps > 0 and fair_pe) else None
+            analyst_estimates = {
+                "period": est.get("period"),
+                "eps_low": est.get("low"),
+                "eps_base": est.get("base"),
+                "eps_high": est.get("high"),
+                "last_reported_eps": est.get("last_reported"),
+                "last_year": est.get("last_year"),
+                "implied_price_low": _imp(est.get("low") or est.get("base")),
+                "implied_price_base": _imp(est.get("base")),
+                "implied_price_high": _imp(est.get("high") or est.get("base")),
+                "fair_pe": round(fair_pe, 1) if fair_pe else None,
+            }
+    except Exception:
+        pass
+
     payload = {
         "ticker": ticker,
         "company_name": company_name,
@@ -614,6 +641,9 @@ def analyze(ticker: str):
         # Moat Valuation Engine output: moat score & components, CAP horizon,
         # market-implied vs expected growth (reverse DCF), Monte Carlo band.
         "valuation_engine": dcf_result.get("engine"),
+        # Wall-Street analyst forward-EPS consensus (low/base/high) + implied price
+        # range — distinct from the model's own DCF scenarios.
+        "analyst_estimates": analyst_estimates,
         # When yfinance served this, the field is absent (matches prior behavior);
         # for FMP-sourced full valuations it records the primary source.
         **({"data_source": source} if source != "yfinance" else {}),

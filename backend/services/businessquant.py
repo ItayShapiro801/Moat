@@ -186,3 +186,55 @@ def forward_growth(ticker: str) -> dict:
     # restarts don't re-burn calls probing tickers BQ doesn't cover.
     _sb.cache_set(f"{_SB_GROWTH_PREFIX}{ticker}", result, _GROWTH_TTL if got else _MISS_TTL)
     return result
+
+
+_SB_EPS_PREFIX = "bqeps:"
+_EPS_CACHE: dict[str, tuple] = {}
+
+
+def analyst_eps_estimates(ticker: str) -> dict | None:
+    """Next fiscal year's consensus forward EPS with the analyst LOW/BASE/HIGH
+    range, from BusinessQuant, or None. Reuses the same /estimates endpoint (mode
+    eps) already fetched for growth, so it costs no extra call once cached. Shape:
+      {"period": "2026", "base": 8.63, "low": 7.9, "high": 9.4,
+       "last_reported": 7.46, "last_year": "2025"}
+    The caller turns EPS x a fair P/E into an analyst-implied price range."""
+    ticker = ticker.upper()
+    hit = _EPS_CACHE.get(ticker)
+    now = time.time()
+    if hit and now - hit[0] < _GROWTH_TTL:
+        return hit[1]
+    from services import supabase_cache as _sb
+    sb_val = _sb.cache_get(f"{_SB_EPS_PREFIX}{ticker}")
+    if isinstance(sb_val, dict) and sb_val.get("base") is not None:
+        _EPS_CACHE[ticker] = (now, sb_val)
+        return sb_val
+    if not BUSINESSQUANT_API_KEYS or not _key_order():
+        return None
+    data = _bq_get(f"estimates?ticker={ticker}&mode=eps")
+    result = None
+    if isinstance(data, dict):
+        ann = None
+        for dim in (data.get("data") or []):
+            if dim.get("dimension") == "annual":
+                ann = dim.get("estimates") or []
+                break
+        if ann:
+            reported = [e for e in ann if e.get("data_type") == "reported"
+                        and _num(e.get("value_reported")) is not None]
+            forward = [e for e in ann if e.get("data_type") == "estimate"
+                       and _num(e.get("value_estimate")) is not None]
+            if forward:
+                nxt = forward[0]
+                result = {
+                    "period": str(nxt.get("period", "")),
+                    "base": _num(nxt.get("value_estimate")),
+                    "low": _num(nxt.get("low_estimate")),
+                    "high": _num(nxt.get("high_estimate")),
+                    "last_reported": _num(reported[-1].get("value_reported")) if reported else None,
+                    "last_year": str(reported[-1].get("period", "")) if reported else None,
+                }
+    if result:
+        _EPS_CACHE[ticker] = (now, result)
+        _sb.cache_set(f"{_SB_EPS_PREFIX}{ticker}", result, _GROWTH_TTL)
+    return result

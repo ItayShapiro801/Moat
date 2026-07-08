@@ -90,21 +90,22 @@ def compute_earnings_multiple_value(info, sector, growth_rate):
     eps = safe_get(info, "trailingEps")
     if eps is None or eps <= 0:
         return None
+    fair_pe = fair_pe_for(info, sector, growth_rate)
+    return round(fair_pe * eps, 2) if fair_pe else None
+
+
+def fair_pe_for(info, sector, growth_rate):
+    """A growth-anchored fair P/E (PEG≈1), sector-capped and market-aware. Shared by
+    the earnings-multiple valuation and the analyst-estimates implied-price range."""
     g = growth_rate if (growth_rate is not None) else 0.0
     g_pct = max(0.0, min(g, 0.30)) * 100  # cap growth contribution at 30%
-    # Base 15x (a mature-market P/E) plus one turn per point of growth (PEG≈1),
-    # then clamp to a sane sector band so nothing runs away.
     high_growth = {"Technology", "Communication Services", "Healthcare"}
     pe_cap = 40 if sector in high_growth else 30
-    # Market-aware ceiling: allow at most a ~25% premium to the multiple the market
-    # pays today. If the market prices a stock at 19x, a growth story justifies ~24x
-    # — not 45x. (Skipped when the current P/E is unavailable.)
     current_pe = safe_get(info, "trailingPE")
     if current_pe and current_pe > 0:
-        pe_cap = min(pe_cap, current_pe * 1.25)
+        pe_cap = min(pe_cap, current_pe * 1.25)  # ≤25% premium to today's multiple
     pe_floor = 10
-    fair_pe = max(pe_floor, min(15 + g_pct, pe_cap))
-    return round(fair_pe * eps, 2)
+    return max(pe_floor, min(15 + g_pct, pe_cap))
 
 
 def compute_internal_dcf(info, fcf_5yr, sector, revenue_5yr=None):

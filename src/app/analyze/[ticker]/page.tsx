@@ -102,6 +102,18 @@ interface AnalysisData {
     monte_carlo: { p10: number; p25: number; p50: number; p75: number; p90: number } | null;
     dcf_reliable?: boolean;
   } | null;
+  analyst_estimates?: {
+    period: string;
+    eps_low: number | null;
+    eps_base: number | null;
+    eps_high: number | null;
+    last_reported_eps: number | null;
+    last_year: string | null;
+    implied_price_low: number | null;
+    implied_price_base: number | null;
+    implied_price_high: number | null;
+    fair_pe: number | null;
+  } | null;
 }
 
 interface MetricsValuation {
@@ -669,6 +681,44 @@ export default function AnalyzePage({
                   )}
                 </div>
               </div>
+            </Card>
+          )}
+
+          {/* Wall-Street analyst estimates — forward EPS consensus low/base/high */}
+          {data.analyst_estimates?.eps_base != null && (
+            <Card>
+              <div className="mb-4 flex items-baseline justify-between flex-wrap gap-2">
+                <h2 className="text-xs font-medium uppercase tracking-widest text-moat-text-muted">
+                  Analyst Estimates
+                </h2>
+                <span className="text-xs text-moat-text-muted">
+                  FY{data.analyst_estimates.period} consensus EPS · Wall Street
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-4">
+                {([
+                  ["Bearish", data.analyst_estimates.eps_low, data.analyst_estimates.implied_price_low, "text-moat-danger"],
+                  ["Base", data.analyst_estimates.eps_base, data.analyst_estimates.implied_price_base, "text-moat-text"],
+                  ["Bullish", data.analyst_estimates.eps_high, data.analyst_estimates.implied_price_high, "text-moat-accent"],
+                ] as const).map(([label, eps, price, cls]) => (
+                  <div key={label} className="flex flex-col gap-1 text-center">
+                    <span className="text-xs uppercase tracking-wider text-moat-text-muted">{label}</span>
+                    <span className={`text-2xl font-mono font-semibold ${cls}`}>
+                      {price != null ? `$${price.toFixed(2)}` : "—"}
+                    </span>
+                    <span className="text-xs text-moat-text-muted">
+                      EPS {eps != null ? `$${eps.toFixed(2)}` : "—"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-4 text-xs text-moat-text-muted">
+                Analyst consensus forward EPS for FY{data.analyst_estimates.period}
+                {data.analyst_estimates.last_reported_eps != null &&
+                  ` (vs $${data.analyst_estimates.last_reported_eps.toFixed(2)} reported in ${data.analyst_estimates.last_year})`}
+                , priced at a {data.analyst_estimates.fair_pe ?? "—"}× fair P/E. This is
+                Wall Street&apos;s own bear/base/bull, independent of the model&apos;s DCF.
+              </p>
             </Card>
           )}
 
