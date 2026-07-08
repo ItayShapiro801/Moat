@@ -12,7 +12,35 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      # FMP: primary market-data provider. Multiple keys rotate to multiply the
+      # free-tier daily cap (~250/key/day); only FMP_API_KEY is required, _2/_3
+      # are optional extras. See backend/config.py FMP_API_KEYS.
       - key: FMP_API_KEY
+        sync: false
+      - key: FMP_API_KEY_2
+        sync: false
+      - key: FMP_API_KEY_3
+        sync: false
+      # Finnhub: free live-quote fallback (price cross-validation + backup path).
+      - key: FINNHUB_API_KEY
+        sync: false
+      # BusinessQuant: free analyst forward-estimates provider used for DCF
+      # growth. Free tier is 30 calls/key/day, so up to 7 keys rotate to extend
+      # the daily budget. Only BUSINESSQUANT_API_KEY is required; _2.._7 are
+      # optional extras. See backend/config.py BUSINESSQUANT_API_KEYS.
+      - key: BUSINESSQUANT_API_KEY
+        sync: false
+      - key: BUSINESSQUANT_API_KEY_2
+        sync: false
+      - key: BUSINESSQUANT_API_KEY_3
+        sync: false
+      - key: BUSINESSQUANT_API_KEY_4
+        sync: false
+      - key: BUSINESSQUANT_API_KEY_5
+        sync: false
+      - key: BUSINESSQUANT_API_KEY_6
+        sync: false
+      - key: BUSINESSQUANT_API_KEY_7
         sync: false
       - key: GROQ_API_KEY
         sync: false
@@ -21,6 +49,13 @@ services:
       - key: CEREBRAS_API_KEY
         sync: false
       - key: RESEND_API_KEY
+        sync: false
+      # Supabase: persistent cache (survives Render free-tier restarts) for
+      # valuations + BusinessQuant growth estimates. Optional — in-memory-only
+      # cache is used if unset. See backend/services/supabase_cache.py.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
         sync: false
       # Set to the deployed frontend origin, e.g. https://moat-yourname.vercel.app
       - key: CORS_ALLOWED_ORIGINS

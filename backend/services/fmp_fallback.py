@@ -487,6 +487,43 @@ def build_fmp_bundle(ticker: str):
     the fallback window); the caller should layer the longer valuation cache."""
     quote = _first(_fmp_get(f"quote?symbol={ticker}")) or {}
     profile = _first(_fmp_get(f"profile?symbol={ticker}")) or {}
+
+    price = _num(quote.get("price")) or _num(profile.get("price"))
+    price = _cross_validate_price(ticker, price, quote)
+    if price is None:
+        return None  # no price at all — nothing usable from FMP
+
+    # ETFs/mutual funds file no income/balance/cash-flow statements (they're
+    # funds, not operating companies), so the statement-based branch below always
+    # returned None for them — /analyze then fell through to EDGAR (also
+    # statement-based, same dead end), leaving funds unresolvable whenever
+    # yfinance was blocked. That broke "Add to Portfolio" for any index fund
+    # (e.g. VT) on the deployed backend. A fund only needs price + identity, so
+    # short-circuit to a minimal quote-only bundle once FMP itself confirms it's
+    # a fund via the profile flags.
+    is_fund = bool(profile.get("isEtf") or profile.get("isFund"))
+    if is_fund:
+        empty = pd.DataFrame()
+        info = {
+            "currentPrice": price,
+            "regularMarketPrice": price,
+            "longName": profile.get("companyName") or quote.get("name") or ticker,
+            "shortName": profile.get("companyName") or ticker,
+            "sector": profile.get("sector") or "",
+            "industry": profile.get("industry") or "",
+            "quoteType": "ETF",
+            "currency": profile.get("currency") or "USD",
+            "beta": _num(profile.get("beta")) or 1.0,
+            "sharesOutstanding": _num(quote.get("sharesOutstanding")),
+            "marketCap": _num(quote.get("marketCap")) or _num(profile.get("marketCap")),
+            "category": profile.get("sector") or profile.get("industry"),
+            "annualReportExpenseRatio": None,  # not on FMP's free tier
+            "totalAssets": _num(profile.get("marketCap")),
+            "longBusinessSummary": (profile.get("description") or "")[:600],
+        }
+        stock = _FmpStock(info, empty, empty, empty, empty, None)
+        return stock, info
+
     inc = _fmp_get(f"income-statement?symbol={ticker}&limit=5")
     bs = _fmp_get(f"balance-sheet-statement?symbol={ticker}&limit=5")
     cf = _fmp_get(f"cash-flow-statement?symbol={ticker}&limit=5")
@@ -494,10 +531,8 @@ def build_fmp_bundle(ticker: str):
     bs = bs if isinstance(bs, list) else []
     cf = cf if isinstance(cf, list) else []
 
-    price = _num(quote.get("price")) or _num(profile.get("price"))
-    price = _cross_validate_price(ticker, price, quote)
-    if price is None or not inc:
-        return None  # without a price and statements there's no full valuation
+    if not inc:
+        return None  # an operating company with no statements — nothing usable
 
     market_cap = _num(quote.get("marketCap")) or _num(profile.get("marketCap"))
     shares = market_cap / price if (market_cap and price) else _num(inc[0].get("weightedAverageShsOut"))

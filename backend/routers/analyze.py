@@ -607,16 +607,21 @@ def analyze(ticker: str):
         # When yfinance served this, the field is absent (matches prior behavior);
         # for FMP-sourced full valuations it records the primary source.
         **({"data_source": source} if source != "yfinance" else {}),
-        # Backup mode: EDGAR+Finnhub only runs once the FMP daily budget is spent.
-        # Still a full valuation (statements from SEC filings, analyst estimates
-        # from the estimates provider when its budget allows), but flagged so the
-        # UI is honest that the primary market-data feed is rate-limited.
+        # Backup mode: EDGAR+Finnhub only runs when FMP's live keys are all
+        # momentarily rate-limited. Still a full valuation (statements from SEC
+        # filings, analyst estimates from the estimates provider when its budget
+        # allows), but flagged so the UI is honest that the primary feed is
+        # temporarily throttled — NOT "out for the day": FMP keys cool down and
+        # recover within the same day (this note previously said "resumes
+        # tomorrow", which was misleading — a ticker fetched a moment later, or
+        # any ticker with a same-day cached result, can look completely normal).
         **({
             "data_limited": True,
             "data_limited_note": (
-                "Live market-data limit reached for today. This estimate is built "
-                "from SEC filings (EDGAR) and may be slightly less precise than "
-                "usual. Full data resumes tomorrow."
+                "The primary live market-data feed is momentarily rate-limited, "
+                "so this estimate is built from SEC filings instead and may be "
+                "slightly less precise. It typically recovers within the hour — "
+                "other tickers may already show full data."
             ),
         } if source == "edgar" else {}),
     }

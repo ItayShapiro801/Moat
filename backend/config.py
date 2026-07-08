@@ -30,7 +30,7 @@ FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 # 30 calls/day PER KEY, so several free accounts are rotated (like FMP). When all
 # keys are spent the DCF falls back to the Finnhub historical-growth proxy, so
 # valuations never break — they're just slightly less precise. Order preserved;
-# blanks ignored. Set BUSINESSQUANT_API_KEY plus optional _2 ... _6 in the host env.
+# blanks ignored. Set BUSINESSQUANT_API_KEY plus optional _2 ... _7 in the host env.
 BUSINESSQUANT_API_KEYS = [
     k for k in (
         os.getenv("BUSINESSQUANT_API_KEY", ""),

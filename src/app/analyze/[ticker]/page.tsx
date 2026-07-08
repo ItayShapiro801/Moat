@@ -418,6 +418,30 @@ export default function AnalyzePage({
                   {data.valuation_note}
                 </p>
               )}
+              {(data.intrinsic_value.bear.value != null ||
+                data.intrinsic_value.bull.value != null) && (
+                <div className="mt-4 grid w-full grid-cols-3 gap-3 border-t border-moat-border pt-4">
+                  {(
+                    [
+                      ["Bearish", data.intrinsic_value.bear, "text-moat-danger"],
+                      ["Base", data.intrinsic_value.base, "text-moat-text"],
+                      ["Bullish", data.intrinsic_value.bull, "text-moat-accent"],
+                    ] as const
+                  ).map(([label, scenario, colorClass]) => (
+                    <div key={label} className="flex flex-col items-center gap-0.5">
+                      <span className="text-[10px] uppercase tracking-wider text-moat-text-muted">
+                        {label}
+                      </span>
+                      <span className={`font-mono text-lg font-semibold ${colorClass}`}>
+                        {scenario.value != null ? `$${scenario.value.toFixed(2)}` : "N/A"}
+                      </span>
+                      <span className="text-[10px] text-moat-text-muted">
+                        {(scenario.growth * 100).toFixed(1)}% growth
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </Card>
 

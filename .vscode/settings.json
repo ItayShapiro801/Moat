@@ -1,0 +1,19 @@
+{
+  // Deterministic, tidy root: group folders above files (VS Code's default,
+  // made explicit here so it doesn't depend on each contributor's own
+  // settings), then alphabetical within each group.
+  "explorer.sortOrder": "type",
+  // Hide generated/build artifacts from the Explorer — none of this is source,
+  // it's all reproducible from a fresh `npm install` / `next build` / `tsc`,
+  // and .gitignore already excludes it from version control. Nothing here is
+  // deleted or moved; this only affects what VS Code's file tree displays.
+  "files.exclude": {
+    "**/.git": true,
+    "**/node_modules": true,
+    ".next": true,
+    "tsconfig.tsbuildinfo": true,
+    "next-env.d.ts": true,
+    "backend/__pycache__": true,
+    "**/__pycache__": true
+  }
+}

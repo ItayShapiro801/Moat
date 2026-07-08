@@ -83,6 +83,12 @@ export function ExportReport({
     const H = doc.internal.pageSize.getHeight();
     const M = 48; // margin
     let y = M;
+    // splitTextToSize wraps on spaces only — a single unbroken run (e.g. a
+    // hyphen-joined LLM phrase) that measures right at the column width has
+    // nowhere to break and gets drawn past the printable area, clipped by the
+    // page edge. A few points of slack means that edge case wraps one word
+    // earlier instead of overflowing.
+    const WRAP_SLACK = 12;
 
     const ensure = (need: number) => {
       if (y + need > H - 56) {
@@ -126,7 +132,7 @@ export function ExportReport({
       doc.setFont("helvetica", "normal");
       doc.setFontSize(10);
       setColor(INK);
-      const lines = doc.splitTextToSize(text, W - 2 * M);
+      const lines = doc.splitTextToSize(text, W - 2 * M - WRAP_SLACK);
       lines.forEach((ln: string) => {
         ensure(14);
         doc.text(ln, M, y);
@@ -294,7 +300,7 @@ export function ExportReport({
           setColor(GREEN);
           doc.text("Bull:", M, y);
           setColor(INK);
-          const lines = doc.splitTextToSize(inv.bull_case, W - 2 * M - 30);
+          const lines = doc.splitTextToSize(inv.bull_case, W - 2 * M - 30 - WRAP_SLACK);
           doc.text(lines, M + 30, y);
           y += lines.length * 11 + 4;
         }
@@ -303,7 +309,7 @@ export function ExportReport({
           setColor(RED);
           doc.text("Bear:", M, y);
           setColor(INK);
-          const lines = doc.splitTextToSize(inv.bear_case, W - 2 * M - 30);
+          const lines = doc.splitTextToSize(inv.bear_case, W - 2 * M - 30 - WRAP_SLACK);
           doc.text(lines, M + 30, y);
           y += lines.length * 11 + 10;
         }

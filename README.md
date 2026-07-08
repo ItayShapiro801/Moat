@@ -1,17 +1,22 @@
 # Moat
 
-Moat is an equity-research web application. Given a ticker, it computes a blended
-intrinsic-value estimate, a Piotroski F-Score, and a set of derived metrics, then
-layers on LLM-generated narrative analysis and a personal portfolio tracker.
+Moat is an equity-research web application. Given a ticker, its **Moat Valuation
+Engine** computes a quality-weighted intrinsic-value estimate — a moat score that
+sets the DCF's growth horizon, a reverse DCF quantifying market-implied growth, a
+Monte Carlo fair-value distribution, and a diagnostic-weighted ensemble across
+independent valuation methods — alongside a Piotroski F-Score and a set of derived
+metrics, then layers on LLM-generated narrative analysis and a personal portfolio
+tracker.
 
 It is a two-tier system: a **Next.js (App Router) frontend** and a **FastAPI
-backend**, with **Supabase** (Postgres + Auth) for user data. The backend owns all
-computation and third-party integrations; the frontend is a typed client that
-renders results and manages auth/portfolio state.
+backend**, with **Supabase** (Postgres + Auth, and a persistent cache) for user
+data and cross-restart state. The backend owns all computation and third-party
+integrations; the frontend is a typed client that renders results and manages
+auth/portfolio state.
 
 > **Scope note.** This README describes only what is implemented in the codebase.
-> Where a subsystem is intentionally simple (e.g. the screener runs as a batch job,
-> the cache is in-memory), that is stated rather than dressed up. See
+> Where a subsystem is intentionally simple (e.g. the screener runs as a batch job),
+> that is stated rather than dressed up. See
 > [Limitations & Future Work](#limitations--future-work).
 
 ---
@@ -67,8 +72,13 @@ Browser ──▶ Next.js (App Router, React 19)
    │              └─▶ FastAPI (REST)      all research / valuation / LLM endpoints
    │                     │                base URL from NEXT_PUBLIC_API_BASE_URL
    │                     │
-   │                     ├─ yfinance / Financial Modeling Prep   fundamentals, prices, external DCF
+   │                     ├─ yfinance → Financial Modeling Prep → SEC EDGAR + Finnhub
+   │                     │     market-data resolver — an uncapped free floor
+   │                     │     (EDGAR + Finnhub) under a capped primary (FMP)
+   │                     ├─ BusinessQuant                       analyst forward-growth estimates
    │                     ├─ SEC EDGAR                            Form 4 insiders, 13F holdings
+   │                     ├─ Supabase (service role)              persistent valuation + growth cache
+   │                     │                                       (survives Render free-tier restarts)
    │                     ├─ LLM chain: Groq → Gemini → Cerebras  thesis, deep research, investor takes
    │                     └─ Resend                               PDF report email (optional)
 ```
@@ -112,10 +122,18 @@ backend/
     search.py          /search
     reports.py         /email-report
   services/            Domain logic (no HTTP concerns)
-    dcf.py             internal 2-stage DCF + external DCF (FMP)
+    valuation_engine.py  Moat Score, CAP-fading DCF, reverse DCF, Monte Carlo,
+                          excess-return model (financials), ensemble weighting
+    dcf.py             legacy internal DCF (still derives the growth input +
+                        capex-normalized base FCF) + external DCF (FMP)
     relative_value.py  multiples valuation + merger/reorg detection
-    blend.py           blend + confidence + sector/cyclical adjustments
+    blend.py           cyclicality/mismatch flags + confidence rating
     piotroski.py       F-Score (9 signals)
+    edgar_fundamentals.py  SEC EDGAR statements → yfinance-shaped adapter (free, uncapped)
+    fmp_fallback.py    FMP client, multi-key rotation, stale-quote cross-validation
+    finnhub_fallback.py  Finnhub client — uncapped price/quote backup
+    businessquant.py   BusinessQuant client — analyst forward-growth, multi-key rotation
+    supabase_cache.py  persistent cache (valuations, growth) across backend restarts
     llm_providers.py   provider fallback chain, response cache, per-key locks
   config.py            env vars + constants
   models.py            Pydantic request models
@@ -130,25 +148,72 @@ src/
 
 ## Core Components
 
-### 1. Valuation engine (`backend/services/`, composed in `routers/analyze.py`)
+### 1. Moat Valuation Engine (`backend/services/valuation_engine.py`, composed in `routers/analyze.py`)
 
-`analyze(ticker)` orchestrates four independent valuation inputs and blends them.
+`analyze(ticker)` orchestrates up to four independent valuation inputs and combines
+them with **diagnostic, reliability-based weights** — not a blind average.
 
-- **Internal DCF (`dcf.py`)** — a 2-stage discounted-cash-flow model. Base free cash
-  flow is projected 5 years, plus a Gordon-growth terminal value. The discount rate
-  is a CAPM-style WACC (`0.045 + beta * 0.05`, clamped to `[0.06, 0.13]`); the growth
-  input prefers forward earnings, then forward revenue, then a 3-year FCF CAGR
-  (clamped to `[-0.15, 0.35]`); terminal growth is sector-aware (3.5% for
-  Technology / Communication Services / Healthcare, else 2.5%). It runs three
-  scenarios — **bear / base / bull** — by varying growth and WACC.
+- **Moat Score (0–100)** — five measurable components, each 0–1 and averaged (a
+  missing component drops out and the rest renormalize, so partial data still
+  scores fairly): return on equity (25%+ ROE = full marks), median FCF margin
+  (20%+ = full marks), revenue-growth consistency (share of up-years over the
+  trailing history), gross-margin stability (`1 − stdev(margins)/8%`, clamped), and
+  the Piotroski F-Score (`/9`). This is the moat, quantified from filings rather
+  than asserted.
+- **Competitive-advantage-period (CAP) DCF (`valuation_engine.py`)** — the moat
+  score sets **how long** the DCF's explicit growth window runs (`5 + 7 * moat/100`
+  years — 5y for no moat, up to 12y for a fortress) and **how slowly growth fades**
+  toward the terminal rate (a geometric decay factor from 0.78 to 0.93 per year,
+  moat-scaled). This is deliberate: a flat 5-year projection undervalues durable
+  compounders and overvalues cyclicals that don't deserve a decade of assumed
+  growth. Growth is capped at 25% to start (uncapped compounding at a hot forward
+  estimate for years running was producing 2–3× overvaluations). The discount rate
+  is CAPM-style WACC (`0.045 + beta * 0.05`, floored at 7.5% so low-beta names don't
+  get an unrealistically cheap terminal multiple, capped at 13%).
+- **Reverse DCF** — the same model solved backwards by bisection: *what growth rate
+  does the current market price imply?* The gap between that implied rate and the
+  analyst-estimate growth actually used is a quantified read on whether the market
+  is under- or over-pricing the story (surfaced as `implied_growth` /
+  `expected_growth` in the payload and on the analyze page).
+- **Monte Carlo fair-value distribution** — ~1,000 simulated paths perturbing
+  growth, WACC, terminal growth, and base FCF around their point estimates produce
+  a fair-value distribution; the **bear/base/bull** scenarios shown on the analyze
+  page are its P25/P50/P75, not three hand-picked parameter sets. Hidden when the
+  DCF's own base case lands outside a sane band vs. the market price (thin/volatile
+  FCF — see below), so the UI never shows false precision on a name where cash flow
+  is the wrong lens.
+- **Excess-return model for balance-sheet financials** — banks, insurers, and
+  investment banks (`industry` contains "bank" / "insur" / "capital market") get
+  `P/B* = (ROE − g) / (Ke − g)` applied to book value per share instead of a DCF
+  (deposits/float make "free cash flow" noise for these businesses). Payment
+  networks and other Financial-Services-sector names that *aren't* balance-sheet
+  businesses (Visa, Mastercard) keep the normal DCF — the exclusion is
+  industry-aware, not a blanket sector rule.
+- **Earnings-multiple anchor** — `fair P/E × trailing EPS`, with the fair P/E
+  derived from growth and capped at both a sector ceiling and 1.25× the company's
+  *current* P/E (so a growth story argues for a premium, not an unmoored multiple).
+  Rescues hyper-capex names (AMZN, TSLA-style) whose reported FCF is too thin for a
+  DCF to be meaningful, and is the fallback anchor for financials.
 - **External DCF (`dcf.py`)** — an independent per-share DCF pulled from Financial
-  Modeling Prep, used as a cross-check. Skipped gracefully if no API key.
+  Modeling Prep, used as a cross-check. Skipped gracefully if no API key or budget.
 - **Relative value (`relative_value.py`)** — multiples-based valuation computed from
   the company's **own 5-year history**: median P/E, P/S, EV/EBITDA, P/FCF, and P/B
   multiples are derived from past years, then applied to current per-share metrics.
-- **Blend (`blend.py`)** — combines internal DCF, external DCF, and relative value
-  into one estimate with weights and a confidence rating. Adjustments are applied
-  based on company characteristics (see Engineering Highlights).
+- **Diagnostic ensemble weighting (`ensemble_weights`)** — rather than averaging
+  whatever sources are available, each source's weight reflects a measurable
+  reliability signal: the internal model's weight scales with how many of the last
+  5 years had positive FCF and whether its growth input was a real forward estimate
+  (dropped to a token 5% weight when the engine itself flags the DCF unreliable —
+  the case that used to let a $52 DCF drag a $975 stock's consensus down 80%); the
+  earnings anchor's weight scales with whether trailing EPS is even positive;
+  relative value and the external DCF carry fixed moderate weights. Weights always
+  renormalize to sum to 1 over whatever sources are actually present.
+- **Confidence isn't just a label** — it's capped at "medium" when the consensus
+  diverges from the market price by more than ~35% (a bold call can still be
+  *right*, but it doesn't get a green "high confidence" badge), and forced to "low"
+  when the DCF is the sole source and structurally unreliable for the company. The
+  screener surfaces this per-row so sorting by margin-of-safety doesn't just float
+  the model's least-certain calls to the top unlabeled.
 
 The same module computes the **Piotroski F-Score** (`piotroski.py`): the standard
 9 binary signals across profitability (ROA, ROA trend, operating cash flow,
@@ -266,27 +331,45 @@ All of the following are present in the codebase:
 - **Multi-method valuation with cross-checks** — internal DCF, an independent
   external DCF, and historical-multiples relative value are computed separately and
   blended, rather than relying on a single number.
-- **Domain-aware blend adjustments** (`blend.py`):
-  - *Financial-sector exclusion* — DCF is dropped for financials/insurance where it
-    is unreliable.
+- **Domain-aware adjustments** (`blend.py`, `valuation_engine.py`):
+  - *Industry-aware financial-model routing* — balance-sheet financials (banks,
+    insurers, investment banks — detected from `industry`, not the broader
+    "Financial Services" sector) get the excess-return model instead of a DCF;
+    payment networks in the same sector (Visa, Mastercard) correctly keep their DCF.
   - *Dynamic cyclicality detection* — independent of the sector label, a company is
     treated as cyclical when its 5-year FCF coefficient of variation exceeds a
     threshold (or shows a negative year amid positive years).
   - *Merger / reorganization guard* (`relative_value.py` → `detect_reorganization`)
     — detects large share-count jumps that would distort per-share history and flags
     the result accordingly.
+  - *Stale-quote guard* (`fmp_fallback.py` → `_cross_validate_price`) — every FMP
+    price is cross-checked against Finnhub's live quote; a >25% divergence (an
+    observed real case: a free-tier quote stale by months after a large run-up)
+    triggers the fresher timestamp winning, with all price-linear ratios (P/E, P/B,
+    P/FCF, market cap) rescaled to match rather than silently poisoning downstream
+    numbers.
 - **Provider fallback chain** — graceful degradation across three LLM providers;
   the system keeps working with any subset of keys configured.
 - **Market-data fallback with rate-limit detection** — when the primary source
   (`yfinance`) throttles, the data endpoints transparently fail over to FMP and
   reshape responses to match, with per-source logging (see Data aggregation layer).
-- **Layered caching, stale-serve, stampede locks & warmup** — to survive a free-tier
-  backend (Render sleeps after ~15 min; its cloud IP is blocked by Yahoo/SEC). Full
-  valuations cache 24h, narrative endpoints 2 days, supporting data 15 min, the FMP
-  degraded path 60s; per-key locks collapse concurrent duplicate requests into one
-  upstream call; when providers are exhausted the caches **serve the last good result**
-  instead of degrading; and a background thread **pre-warms** popular tickers 30s after
-  startup so the first real user isn't the one paying the cold-start cost.
+- **Two-tier caching (in-memory + persistent Supabase), stale-serve, stampede
+  locks & warmup** — to survive a free-tier backend (Render sleeps after ~15 min
+  idle, which wipes any in-process-only cache; its cloud IP is also blocked by
+  Yahoo/SEC). Full valuations cache 24h **and persist to Supabase**
+  (`services/supabase_cache.py`, service-role key, fails open to in-memory-only if
+  unset) so a computed valuation survives a cold start instead of being recomputed
+  from scratch on every wake; a cache **hit still re-fetches only the live price**
+  (`_with_fresh_price`) so the headline quote is never a day stale. Valuations
+  built from the EDGAR/Finnhub backup, or with the Finnhub growth *proxy* instead
+  of a real analyst estimate, get a short **3-hour** TTL instead of 24h — so a
+  ticker doesn't stay "stuck" showing degraded data long after the primary
+  provider recovers. Narrative endpoints cache 2 days, supporting data 15 min, the
+  FMP degraded path 60s; per-key locks collapse concurrent duplicate requests into
+  one upstream call; when providers are exhausted the caches **serve the last good
+  result** instead of degrading; and a background thread **pre-warms** popular
+  tickers 30s after startup so the first real user isn't the one paying the
+  cold-start cost.
 - **Concurrent API aggregation** — SEC EDGAR fan-out via `ThreadPoolExecutor`
   (`max_workers` of 3–4) in `ownership.py`.
 - **Best-effort fan-in** — the deep-research aggregator isolates each sub-fetch with
@@ -318,18 +401,22 @@ All backend endpoints (FastAPI, served with OpenAPI docs at `/docs`):
 | GET | `/search` | Ticker/instrument search |
 | POST | `/portfolio-insights` | LLM assessment of a holdings set |
 | POST | `/email-report` | Email a generated PDF (optional, off by default) |
-| GET | `/warmup`, `/health` | Cache warmup (also auto-runs 30s post-startup) + liveness |
+| GET | `/warmup` | Cache warmup (also auto-runs 30s post-startup) |
+| GET | `/health` | Liveness + loaded provider-key counts (FMP / BusinessQuant / Finnhub) |
 
 ## Tech Stack
 
 **Frontend** — Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS v4,
 Recharts, Framer Motion, jsPDF + html2canvas-pro, `@supabase/ssr`.
 
-**Backend** — FastAPI, Uvicorn, market-data chain (Financial Modeling Prep as
-primary, `yfinance` opportunistic, Finnhub as backup), SEC EDGAR, LLM SDKs (Groq,
-Google Generative AI, Cerebras), Resend, `pandas`.
+**Backend** — FastAPI, Uvicorn, market-data resolver chain (`yfinance` opportunistic
+→ Financial Modeling Prep primary → SEC EDGAR + Finnhub uncapped backup),
+BusinessQuant (analyst forward-growth estimates), LLM SDKs (Groq, Google
+Generative AI, Cerebras), Resend, `pandas`.
 
-**Data & Auth** — Supabase (Postgres + Auth + Row-Level Security).
+**Data, Auth & Cache** — Supabase (Postgres + Auth + Row-Level Security; also used
+as a persistent cache for valuations and growth estimates so they survive
+free-tier backend restarts).
 
 ## Project Structure
 
@@ -399,10 +486,19 @@ committed):
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | frontend | Supabase anon key (RLS-protected) |
 | `NEXT_PUBLIC_API_BASE_URL` | frontend | Backend base URL (default `http://localhost:8000`) |
 | `NEXT_PUBLIC_ENABLE_EMAIL` | frontend | Show the "Email PDF" button (default off) |
-| `FMP_API_KEY` | backend | Financial Modeling Prep (external DCF) |
+| `FMP_API_KEY` (+ optional `_2`, `_3`) | backend | Financial Modeling Prep — primary market data + external DCF; multiple keys rotate to raise the effective daily cap |
+| `FINNHUB_API_KEY` | backend | Live-quote cross-validation + the uncapped price/multiples backup |
+| `BUSINESSQUANT_API_KEY` (+ optional `_2`..`_7`) | backend | Analyst forward-growth estimates for the DCF; multiple keys rotate (30 calls/key/day) |
+| `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | backend | Persistent valuation/growth cache (service-role key; optional — falls back to in-memory-only if unset) |
 | `GROQ_API_KEY` / `GEMINI_API_KEY` / `CEREBRAS_API_KEY` | backend | LLM fallback chain |
 | `RESEND_API_KEY` | backend | Email delivery (optional) |
 | `CORS_ALLOWED_ORIGINS` | backend | Comma-separated allowed origins |
+
+Every provider key is individually optional — the app degrades gracefully as keys
+are omitted (down to the uncapped EDGAR + Finnhub floor with no keys at all beyond
+the required `SUPABASE_*` frontend pair). `GET /health` on the backend reports how
+many keys were actually loaded for each rotated provider, useful for confirming a
+deploy picked up the full key set.
 
 Details and the database schema: [docs/Configuration.md](docs/Configuration.md).
 
@@ -436,24 +532,28 @@ Stated honestly so the boundaries are clear:
   (mainly Recharts generic mismatches and Supabase callback `any`s) are currently
   not enforced at build time (`next.config.ts` → `ignoreBuildErrors`). Behavior is
   unaffected; resolving them is tracked work.
-- **External-API dependence & FMP budget.** With FMP as the primary source, a cold
-  `/analyze` costs ~8 FMP calls, so the free 250/day cap covers ~30 unique cold
-  tickers/day. The 3-hour valuation cache, the yfinance-first ordering, and the
-  Finnhub tier mitigate this, but high unique-ticker traffic can still exhaust FMP's
-  daily quota (after which the app degrades to Finnhub/quote-only). The cache is
-  in-process, so it shares the single-instance limitation above.
-- **FMP-path valuation is more conservative.** FMP's free tier lacks forward
-  analyst growth estimates, so on the FMP path the internal DCF falls back to a
-  historical FCF CAGR — a supported but more conservative path that can lower the
-  DCF leg of the consensus versus the yfinance path. Relative value and the external
-  FMP DCF still anchor the estimate.
+- **External-API dependence, mitigated by an uncapped floor.** FMP is the primary
+  data source (fastest, most complete) but is daily-capped even with multiple
+  rotated keys; BusinessQuant's analyst-estimate tier is capped harder still
+  (30 calls/key/day). Both degrade to the SEC EDGAR + Finnhub combo, which is
+  **free and uncapped**, so the app never goes fully dark — a ticker served from
+  the backup is explicitly flagged (`data_limited`) rather than presented as
+  primary-quality, and typically recovers within the hour as FMP's key cooldowns
+  expire (not "the next day" — a common misreading the in-app copy used to invite).
+  The persistent Supabase cache (above) means a previously-computed ticker also
+  doesn't re-spend budget on every cold start.
 - **Stock-split distortion on the FMP path.** FMP reports per-period share counts
   as-reported (not split-adjusted), so a recent stock split shows up as a large
   share-count jump. The merger/reorganization guard correctly flags such cases as
   low-confidence rather than emitting a confident wrong number, but the relative-value
   multiple for a recently-split name on the FMP path can be unreliable until adjusted.
-- **Finnhub key is optional/pending.** The third tier is built and structurally
-  verified; live behavior requires `FINNHUB_API_KEY` to be set.
+- **Screener freshness window.** `/screener` serves a batch snapshot valid for 31
+  days; past that it still serves (stale beats blank) but is flagged `stale: true`
+  with a visible banner rather than silently aging forever.
+- **PDF text wrapping has a safety margin, not a guarantee.** `jsPDF`'s
+  `splitTextToSize` only breaks on spaces; a single very long unbroken run in an
+  LLM-generated sentence (rare, but possible) could still overflow a column despite
+  the wrap-slack margin added around each text block.
 
 Planned and tracked improvements are detailed in
 [docs/Development.md](docs/Development.md#future-improvements).

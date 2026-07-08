@@ -20,14 +20,24 @@ files; real secrets are git-ignored and must never be committed.
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `FMP_API_KEY` | recommended | Financial Modeling Prep — external DCF & fundamentals |
+| `FMP_API_KEY` | recommended | Financial Modeling Prep — primary market data + external DCF |
+| `FMP_API_KEY_2`, `FMP_API_KEY_3` | optional | Extra FMP keys rotated to raise the effective daily cap |
+| `FINNHUB_API_KEY` | recommended | Live-quote cross-validation + the uncapped price/multiples backup |
+| `BUSINESSQUANT_API_KEY` | optional | Analyst forward-growth estimates for the DCF |
+| `BUSINESSQUANT_API_KEY_2` .. `_7` | optional | Extra BusinessQuant keys rotated (30 calls/key/day each) |
+| `SUPABASE_URL` | optional | Same project URL as the frontend — enables the persistent cache below |
+| `SUPABASE_SERVICE_KEY` | optional | Service-role key (bypasses RLS; backend-only, never expose to the browser) |
 | `GROQ_API_KEY` | recommended | Primary LLM provider |
 | `GEMINI_API_KEY` | recommended | Second LLM provider (fallback) |
 | `CEREBRAS_API_KEY` | optional | Third LLM provider (fallback) |
 | `RESEND_API_KEY` | optional | Email delivery of PDF reports |
 
 The LLM chain tries Groq → Gemini → Cerebras, so the app still functions with a
-subset of keys; AI features simply have fewer fallbacks.
+subset of keys; AI features simply have fewer fallbacks. Market data works with
+**no keys at all** via the free, uncapped SEC EDGAR + Finnhub path, though FMP and
+BusinessQuant materially improve accuracy and freshness while their budgets last.
+`GET /health` on a running backend reports how many keys were actually loaded for
+each rotated provider.
 
 ## Database schema
 
@@ -74,6 +84,27 @@ alter table portfolio_insights_cache enable row level security;
 create policy "Users manage own insights cache"
   on portfolio_insights_cache for all
   using (auth.uid() = user_id);
+```
+
+### `analysis_cache` (optional — persistent backend cache)
+
+Only needed if `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` are set. Lets computed
+valuations and BusinessQuant growth estimates survive a Render free-tier restart
+instead of being recomputed (and re-spending capped-provider budget) on every cold
+start. The backend accesses it with the **service-role key**, so RLS is enabled
+with no permissive policy — only the backend can read/write it, never the browser.
+
+```sql
+create table if not exists analysis_cache (
+  key text primary key,
+  value jsonb not null,
+  expires_at timestamptz not null
+);
+
+alter table analysis_cache enable row level security;
+-- No policy is added: only the service-role key (used exclusively by the
+-- backend) can bypass RLS and access this table. The browser's anon key
+-- cannot read or write it.
 ```
 
 > **Verifying the schema:** a `select` of the new columns/tables via the anon key

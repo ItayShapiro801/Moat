@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import CORS_ORIGINS
+from config import CORS_ORIGINS, FMP_API_KEYS, BUSINESSQUANT_API_KEYS, FINNHUB_API_KEY
 from routers import (analyze, investors, thesis, portfolio, screener,
                      ownership, search, reports)
 
@@ -22,6 +22,16 @@ app.include_router(screener.router)
 app.include_router(ownership.router)
 app.include_router(search.router)
 app.include_router(reports.router)
+
+# Printed once at import time (visible immediately in Render's deploy logs) so a
+# missing/misconfigured key set is obvious without needing dashboard access or
+# curling /health. See /health for the same counts on a running instance.
+print(
+    f"[startup] provider keys loaded — FMP: {len(FMP_API_KEYS)}, "
+    f"BusinessQuant: {len(BUSINESSQUANT_API_KEYS)}, "
+    f"Finnhub: {'yes' if FINNHUB_API_KEY else 'no'}",
+    flush=True,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +67,18 @@ def warmup():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    # Reports how many rotation keys are actually loaded for each capped
+    # provider — a quick way to confirm a deploy has the full key set (e.g. all
+    # 7 BusinessQuant keys) without needing dashboard access: hit /health and
+    # read the counts, rather than guessing from ticker-by-ticker behavior.
+    return {
+        "status": "ok",
+        "keys_loaded": {
+            "fmp": len(FMP_API_KEYS),
+            "businessquant": len(BUSINESSQUANT_API_KEYS),
+            "finnhub": 1 if FINNHUB_API_KEY else 0,
+        },
+    }
 
 
 @app.on_event("startup")

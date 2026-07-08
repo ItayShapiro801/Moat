@@ -31,9 +31,13 @@ npm run dev
 
 `/screener` reads `backend/screener_cache.json`, which is produced by
 `python backend/run_screener.py` (a manual, occasional job that fetches the S&P 500
-and computes lightweight valuations). The file is git-ignored because it is
-regenerable data, not source. If the screener shows "cache not built", run the
-script once.
+and computes lightweight valuations). Unlike most generated data, **this file is
+committed** (see the comment in `.gitignore`): Render's free tier has ephemeral
+storage and doesn't run `run_screener.py`, so the prebuilt cache has to ship with
+the app for the screener to have real data in production. To refresh it: re-run
+the script locally, then commit the updated file. `/screener` treats a snapshot
+older than 31 days as stale (still served, but flagged) — see
+`backend/routers/screener.py`.
 
 ## Conventions
 
