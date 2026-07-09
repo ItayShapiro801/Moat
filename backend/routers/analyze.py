@@ -268,6 +268,109 @@ def _resolve_market_data(ticker: str):
     # 4. No full-data provider; caller handles degraded quote-only path.
     return None, None, None
 
+
+def _fx_to(base: str, quote: str):
+    """Conversion rate from `base` currency into `quote` (e.g. DKK->USD ≈ 0.145).
+    Uses Finnhub's free forex quote (works on cloud where yfinance is blocked),
+    then yfinance as a backup. Returns None if it can't be determined."""
+    base, quote = (base or "").upper(), (quote or "").upper()
+    if not base or not quote or base == quote:
+        return 1.0
+    # Finnhub forex: OANDA:BASE_QUOTE current price.
+    try:
+        from services import finnhub_fallback as _fh
+        q = _fh._get(f"quote?symbol=OANDA:{base}_{quote}")
+        c = q.get("c") if isinstance(q, dict) else None
+        if c and float(c) > 0:
+            return float(c)
+    except Exception:
+        pass
+    try:
+        fx = yf.Ticker(f"{base}{quote}=X")
+        rate = float(fx.fast_info["last_price"])
+        if rate and rate > 0:
+            return rate
+    except Exception:
+        pass
+    return None
+
+
+# Statement-derived money fields reported in the FINANCIAL currency (need FX).
+# NOT marketCap/enterpriseValue — those come from the USD price × share count and
+# are already in the trading currency; scaling them would double-convert.
+_MONEY_INFO_FIELDS = (
+    "totalDebt", "totalCash", "freeCashflow", "ebitda",
+)
+_PER_SHARE_INFO_FIELDS = (
+    "trailingEps", "revenuePerShare", "bookValue", "forwardEps",
+)
+
+
+class _CurrencyScaledStock:
+    """Wraps a stock (yfinance.Ticker or _FmpStock) exposing FX-scaled statement
+    DataFrames while delegating everything else (e.g. .history, .info) unchanged.
+    Share-count rows are left un-scaled — only monetary rows are converted."""
+    def __init__(self, inner, rate):
+        self._inner = inner
+        self._rate = rate
+
+    def _scaled(self, df):
+        if df is None or getattr(df, "empty", True):
+            return df
+        out = df * self._rate
+        for r in df.index:
+            if "Share" in str(r):  # share counts are not money — keep as-is
+                out.loc[r] = df.loc[r]
+        return out
+
+    @property
+    def financials(self):
+        return self._scaled(getattr(self._inner, "financials", None))
+
+    @property
+    def balance_sheet(self):
+        return self._scaled(getattr(self._inner, "balance_sheet", None))
+
+    @property
+    def cashflow(self):
+        return self._scaled(getattr(self._inner, "cashflow", None))
+
+    @property
+    def quarterly_balance_sheet(self):
+        return self._scaled(getattr(self._inner, "quarterly_balance_sheet", None))
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)  # delegate history(), info, etc.
+
+
+def _normalize_statement_currency(ticker, stock, info):
+    """If the company reports statements in a DIFFERENT currency than it trades in
+    (foreign filers / ADRs — e.g. NVO trades USD but reports DKK), convert every
+    statement value and monetary info field into the TRADING currency so the DCF's
+    per-share math is consistent with the price. No-op when currencies match or the
+    FX rate is unavailable."""
+    fin_ccy = safe_get(info, "financialCurrency")
+    trade_ccy = safe_get(info, "currency") or "USD"
+    if not fin_ccy or fin_ccy == trade_ccy:
+        return stock, info
+    rate = _fx_to(fin_ccy, trade_ccy)  # statements(fin_ccy) * rate -> trade_ccy
+    if not rate or rate == 1.0:
+        return stock, info
+    try:
+        for k in _MONEY_INFO_FIELDS + _PER_SHARE_INFO_FIELDS:
+            v = info.get(k)
+            if isinstance(v, (int, float)):
+                info[k] = v * rate
+        # Recompute enterprise value from the (USD) market cap + FX-scaled net debt.
+        mc = info.get("marketCap")
+        if isinstance(mc, (int, float)):
+            info["enterpriseValue"] = mc + (info.get("totalDebt") or 0) - (info.get("totalCash") or 0)
+        info["_fx_normalized"] = {"from": fin_ccy, "to": trade_ccy, "rate": round(rate, 6)}
+        return _CurrencyScaledStock(stock, rate), info
+    except Exception:
+        return stock, info
+
+
 @router.get("/analyze/{ticker}")
 def analyze(ticker: str):
     ticker = ticker.upper()
@@ -306,6 +409,14 @@ def analyze(ticker: str):
         raise HTTPException(status_code=503, detail=f"Data temporarily unavailable for {ticker}.")
 
     log_source("analyze", ticker, source)
+
+    # Currency normalization for foreign filers / ADRs. A company like Novo Nordisk
+    # (NVO) trades as a USD ADR but reports its statements in DKK — yfinance exposes
+    # this as currency=USD, financialCurrency=DKK. Feeding DKK cash flows (309B DKK
+    # revenue) into a DCF against a USD share price produced an intrinsic value of
+    # ~$2268 on a $49 stock. When the two differ, convert every statement value +
+    # monetary info field into the TRADING currency so per-share math is consistent.
+    stock, info = _normalize_statement_currency(ticker, stock, info)
 
     # Backfill forward-ish growth from Finnhub (free/uncapped) for any source that
     # didn't supply it — notably FMP's free tier, which leaves growth None and would
