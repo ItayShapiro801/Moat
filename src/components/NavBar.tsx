@@ -10,7 +10,6 @@ const NAV_LINKS = [
   { label: "Home", href: "/" },
   { label: "Screener", href: "/screener" },
   { label: "Compare", href: "/compare" },
-  { label: "Features", href: "/#features" },
 ];
 
 type Mode = "login" | "signup" | "forgot";

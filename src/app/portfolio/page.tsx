@@ -181,11 +181,12 @@ export default function PortfolioPage() {
       const newShares = amt / priceUsd;
 
       const existing = rows.find((r) => r.ticker === pendingTicker);
+      let dbError = null;
       if (existing) {
         // Weighted-average add-more
         const totalShares = existing.shares + newShares;
         const totalInvested = existing.amount_invested + amt;
-        await supabase
+        const { error } = await supabase
           .from("portfolio_holdings")
           .update({
             shares: totalShares,
@@ -194,19 +195,32 @@ export default function PortfolioPage() {
           })
           .eq("user_id", user.id)
           .eq("ticker", pendingTicker);
+        dbError = error;
       } else {
-        await supabase.from("portfolio_holdings").upsert(
-          {
-            user_id: user.id,
-            ticker: pendingTicker,
-            amount_invested: amt,
-            price_at_purchase: priceUsd,
-            shares: newShares,
-            currency,
-            quote_type: d.quote_type || "EQUITY",
-          },
-          { onConflict: "user_id,ticker" }
-        );
+        // Some portfolio_holdings schemas don't have a quote_type column; retry
+        // without it if the first insert is rejected for that reason, so adding a
+        // holding never silently fails on a schema mismatch.
+        const base = {
+          user_id: user.id,
+          ticker: pendingTicker,
+          amount_invested: amt,
+          price_at_purchase: priceUsd,
+          shares: newShares,
+          currency,
+        };
+        let { error } = await supabase
+          .from("portfolio_holdings")
+          .upsert({ ...base, quote_type: d.quote_type || "EQUITY" }, { onConflict: "user_id,ticker" });
+        if (error && /quote_type|column/i.test(error.message || "")) {
+          ({ error } = await supabase
+            .from("portfolio_holdings")
+            .upsert(base, { onConflict: "user_id,ticker" }));
+        }
+        dbError = error;
+      }
+      if (dbError) {
+        setAddError(`Couldn't add: ${dbError.message}`);
+        return;
       }
       setPendingTicker(null);
       setAddAmount("");

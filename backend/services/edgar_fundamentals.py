@@ -312,6 +312,15 @@ def build_edgar_bundle(ticker: str):
         "priceToBook": price_to_book,
         "enterpriseToEbitda": ev_ebitda,
         "debtToEquity": debt_to_equity,
+        # Dividend + liquidity fields from Finnhub's metric blob (yfinance key names),
+        # so the "Dividends & Income" and quick-ratio cells populate on the EDGAR path
+        # instead of showing N/A. Finnhub reports yield/payout as percents.
+        "quickRatio": _num(metric.get("quickRatioAnnual")) or _num(metric.get("quickRatioQuarterly")),
+        "dividendYield": (_num(metric.get("currentDividendYieldTTM"))
+                          or _num(metric.get("dividendYieldIndicatedAnnual"))),
+        "dividendRate": _num(metric.get("dividendIndicatedAnnual")) or _num(metric.get("dividendPerShareAnnual")),
+        "payoutRatio": (_num(metric.get("payoutRatioTTM")) / 100.0
+                        if _num(metric.get("payoutRatioTTM")) is not None else None),
     }
 
     stock = _FmpStock(info, financials, balance_sheet, cashflow, pd.DataFrame(), prices_df)
