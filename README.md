@@ -259,14 +259,34 @@ range, a confidence level, and a short rationale.
   supplies them; FMP's free tier does not. So growth is backfilled for any source
   that lacks it, best-to-good: **(1)** the source's own estimate (yfinance) →
   **(2)** BusinessQuant's real next-year analyst consensus (free, 30/day per key,
-  rotated across accounts — 6 keys ≈ 90 stocks/day) → **(3)** a Finnhub
+  rotated across accounts — 7 keys ≈ 100 stocks/day) → **(3)** a Finnhub
   historical-growth **proxy** (uncapped). The proxy guarantees growth is always
   populated; without it the DCF collapses to a weak historical FCF CAGR that badly
-  undervalues growth names (AAPL → ~$124). An earnings-multiple anchor
+  undervalues growth names (AAPL → ~$124). For a reinvesting growth company whose
+  forward *earnings* growth is transiently depressed while *revenue* compounds
+  (e.g. TTD: +4% earnings, +19% revenue), the two are blended so the DCF isn't
+  anchored to the low figure. An earnings-multiple anchor
   (`compute_earnings_multiple_value`) additionally rescues hyper-capex names
   (AMZN/TSLA) whose free cash flow is too thin for a DCF.
-- **Honest "data limit reached" banner.** When a valuation comes from the EDGAR
-  backup (FMP budget spent), the payload carries `data_limited` and the UI shows a
+- **Real analyst consensus** (`analyst_recommendation`, Finnhub). The analyst card
+  shows Wall Street's actual Buy/Hold/Sell breakdown and a derived consensus rating
+  (e.g. AAPL *Buy*, 54 analysts), not a fabricated price target — free-tier price
+  targets are premium-gated, so we report only what is genuinely available.
+- **Foreign-filer currency normalization** (`_normalize_statement_currency`). An ADR
+  that trades in USD but reports in another currency (NVO: statements in DKK) would
+  otherwise feed DKK cash flows into a USD-priced DCF and print a ~$2,268 value on a
+  $49 stock. When `financialCurrency != currency`, statement DataFrames and the
+  statement-derived info fields are converted to the trading currency via a live FX
+  rate; share counts and the USD market cap are left untouched.
+- **Share-count scale guard.** Some filers report weighted-average shares in a scaled
+  unit (MCD's XBRL gives "716.4" meaning 716.4 M). Read literally this exploded every
+  per-share figure ~1e6× (MCD intrinsic value showed *$291 million*); when the market
+  provider's share count differs by >100×, the mis-scaled XBRL figure is discarded.
+- **Honest "data limit reached" banner.** Reserved for the genuinely degraded
+  quote-only fallback. The EDGAR path is now a *complete* valuation (SEC statements +
+  BusinessQuant estimates + Finnhub price/ratios), so it is **not** flagged — on the
+  free tier FMP is usually capped, and flagging every normal EDGAR result cried wolf.
+  When a valuation IS degraded, the payload carries `data_limited` and the UI shows a
   clear notice that the estimate is from SEC filings and may be less precise — a
   backup number is never dressed up as the primary feed.
 - **Full-valuation cache + stale-serve** (`routers/analyze.py`). A successful full
@@ -293,8 +313,11 @@ range, a confidence level, and a short rationale.
 
 ### 3. Portfolio system (`src/app/portfolio/`, `backend/routers/portfolio.py`, Supabase)
 
-- Holdings are stored per user in Supabase `portfolio_holdings` (RLS-enforced), with
-  amount invested, shares, purchase price, currency, and asset type.
+- Holdings are stored per user in Supabase `portfolio_holdings` (RLS-enforced with
+  SELECT/INSERT/**UPDATE**/DELETE policies keyed on `auth.uid() = user_id`), with
+  amount invested, shares, purchase price, currency, and asset type. The UPDATE
+  policy is required so an upsert that resolves to an update (adding to an existing
+  holding) isn't silently blocked.
 - The frontend computes live value, gain/loss, and allocation; non-USD holdings are
   converted to USD via the backend `/fx-rate` endpoint, and both native and USD
   values are shown.
