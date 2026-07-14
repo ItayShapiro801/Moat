@@ -170,11 +170,22 @@ export default function PortfolioPage() {
       const currency = d.currency || "USD";
       let rate = 1;
       if (currency !== "USD") {
+        // Never silently convert 1:1 — that records e.g. a ¥50,000 holding as
+        // $50,000. If the FX rate is unavailable, refuse the add with a clear
+        // message instead of storing wrong money.
+        let ok = false;
         try {
           const fx = await fetch(`${API_BASE_URL}/fx-rate?base=${currency}`).then((r) => r.json());
-          if (fx.rate_to_usd && fx.rate_to_usd > 0) rate = fx.rate_to_usd;
+          if (fx.rate_to_usd && fx.rate_to_usd > 0) {
+            rate = fx.rate_to_usd;
+            ok = true;
+          }
         } catch {
-          /* 1:1 fallback */
+          /* handled below */
+        }
+        if (!ok) {
+          setAddError(`Couldn't get a ${currency}→USD exchange rate right now. Please try again shortly.`);
+          return;
         }
       }
       const priceUsd = nativePrice * rate;

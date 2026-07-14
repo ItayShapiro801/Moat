@@ -931,23 +931,20 @@ def _price_history_impl(ticker: str, period: str, ckey: str):
 @router.get("/fx-rate")
 def fx_rate(base: str = "USD"):
     """Live conversion rate from `base` currency to USD (e.g. JPY -> 0.0064).
-    Used to convert non-USD portfolio holdings into a common USD total."""
+    Used to convert non-USD portfolio holdings into a common USD total.
+
+    Routes through the shared _fx_to() (Finnhub OANDA first, yfinance backup) so it
+    works on cloud hosts where yfinance is IP-blocked — the old yfinance-only
+    version returned null in production, and the frontend then silently converted
+    1:1, recording a ¥50,000 holding as $50,000. Returns rate_to_usd: null when the
+    rate genuinely can't be determined, and the frontend surfaces that rather than
+    inventing a 1:1 rate."""
     base = (base or "USD").upper()
     if base == "USD":
         return {"base": base, "rate_to_usd": 1.0}
-    try:
-        fx = yf.Ticker(f"{base}USD=X")
-        rate = None
-        try:
-            rate = float(fx.fast_info["last_price"])
-        except Exception:
-            info = fx.info or {}
-            r = info.get("regularMarketPrice") or info.get("currentPrice")
-            rate = float(r) if r is not None else None
-        if rate and math.isfinite(rate) and rate > 0:
-            return {"base": base, "rate_to_usd": rate}
-    except Exception:
-        pass
+    rate = _fx_to(base, "USD")
+    if rate and math.isfinite(rate) and rate > 0:
+        return {"base": base, "rate_to_usd": rate}
     return {"base": base, "rate_to_usd": None}
 
 
