@@ -202,7 +202,11 @@ def compute_relative_value(stock, info, current_price, reorganized=False):
 
     pe_mults = historical_multiples(ni_vals)
     ps_mults = historical_multiples(rev_vals)
-    ev_ebitda_mults = historical_multiples(ebitda_vals)
+    # NOTE: historical_multiples divides PRICE by a per-share metric, so this is a
+    # P/EBITDA (equity) multiple, NOT EV/EBITDA. Named accordingly to avoid the
+    # earlier bug where net debt was subtracted from a P/EBITDA-derived value
+    # (double-counting debt for leveraged firms, adding it back for net-cash firms).
+    pebitda_mults = historical_multiples(ebitda_vals)
     pfcf_mults = historical_multiples(fcf_vals)
     pb_mults = historical_multiples(equity_vals)
 
@@ -225,12 +229,14 @@ def compute_relative_value(stock, info, current_price, reorganized=False):
     if med_ps and rev_ps and rev_ps > 0:
         factors["ps"] = {"median": round(med_ps, 1), "implied": round(med_ps * rev_ps, 2), "weight": 0.10}
 
-    med_ev_eb = safe_median(ev_ebitda_mults)
-    if med_ev_eb and ebitda_ttm and ebitda_ttm > 0 and ev and shares:
-        implied_ev = med_ev_eb * ebitda_ttm
-        net_debt = ev - (current_price * shares)
-        implied_eq = implied_ev - net_debt
-        factors["ev_ebitda"] = {"median": round(med_ev_eb, 1), "implied": round(implied_eq / shares, 2), "weight": 0.30}
+    # P/EBITDA: a P/EBITDA multiple times EBITDA-per-share IS the implied equity
+    # value per share directly — no net-debt adjustment (that's only for a true
+    # EV/EBITDA where the multiple maps to enterprise value). ebitda_ps derived
+    # from the TTM EBITDA and share count.
+    med_pebitda = safe_median(pebitda_mults)
+    ebitda_ps = (ebitda_ttm / shares) if (ebitda_ttm and shares) else None
+    if med_pebitda and ebitda_ps and ebitda_ps > 0:
+        factors["ev_ebitda"] = {"median": round(med_pebitda, 1), "implied": round(med_pebitda * ebitda_ps, 2), "weight": 0.30}
 
     med_pfcf = safe_median(pfcf_mults)
     if med_pfcf and fcf_ps and fcf_ps > 0:
