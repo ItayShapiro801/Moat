@@ -6,12 +6,6 @@ import { jsPDF } from "jspdf";
 // html2canvas-pro supports modern CSS color functions (lab/oklch) that the
 // original html2canvas chokes on with Tailwind v4.
 import html2canvas from "html2canvas-pro";
-import { useAuth } from "@/lib/auth-context";
-
-// Email delivery requires a verified sending domain (Resend), which the public
-// free deployment doesn't have. Hidden unless explicitly enabled; "Download PDF"
-// works for everyone regardless. Set NEXT_PUBLIC_ENABLE_EMAIL=true to re-enable.
-const EMAIL_ENABLED = process.env.NEXT_PUBLIC_ENABLE_EMAIL === "true";
 
 interface Scenario {
   value: number | null;
@@ -54,10 +48,7 @@ export function ExportReport({
   data: ReportData;
   ticker: string;
 }) {
-  const { user } = useAuth();
   const [open, setOpen] = useState(false);
-  const [emailMode, setEmailMode] = useState(false);
-  const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
@@ -392,44 +383,10 @@ export function ExportReport({
     }
   }
 
-  async function handleEmail() {
-    const to = (email || user?.email || "").trim();
-    if (!to) {
-      setMsg({ type: "error", text: "Enter an email address." });
-      return;
-    }
-    setBusy(true);
-    setMsg(null);
-    try {
-      const doc = await buildPdf();
-      const dataUri = doc.output("datauristring");
-      const res = await fetch(`${API_BASE_URL}/email-report`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to_email: to, ticker, pdf_base64: dataUri }),
-      });
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        throw new Error(e.detail || "Email failed");
-      }
-      setMsg({ type: "success", text: `Report sent to ${to}` });
-    } catch (err: unknown) {
-      setMsg({
-        type: "error",
-        text: err instanceof Error ? err.message : "Email failed.",
-      });
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
     <div className="relative">
       <button
-        onClick={() => {
-          setOpen((o) => !o);
-          setEmail(user?.email || "");
-        }}
+        onClick={() => setOpen((o) => !o)}
         className="px-3 py-1 rounded-lg text-sm font-medium border border-moat-border text-moat-text hover:bg-moat-surface-hover transition-colors"
       >
         Export Report
@@ -455,32 +412,6 @@ export function ExportReport({
               >
                 Download PDF
               </button>
-
-              {EMAIL_ENABLED &&
-                (!emailMode ? (
-                  <button
-                    onClick={() => setEmailMode(true)}
-                    className="w-full py-2 rounded-md border border-moat-border text-moat-text text-sm font-medium hover:bg-moat-surface-hover transition-colors"
-                  >
-                    Email PDF
-                  </button>
-                ) : (
-                  <div className="flex flex-col gap-2">
-                    <input
-                      type="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="Email address"
-                      className="rounded-md border border-moat-border bg-moat-bg px-3 py-1.5 text-moat-text placeholder:text-moat-text-muted text-sm focus:outline-none focus:ring-2 focus:ring-moat-accent"
-                    />
-                    <button
-                      onClick={handleEmail}
-                      className="w-full py-2 rounded-md bg-moat-accent text-moat-bg text-sm font-medium hover:bg-moat-accent/90 transition-colors"
-                    >
-                      Send
-                    </button>
-                  </div>
-                ))}
 
               {msg && (
                 <p

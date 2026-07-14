@@ -19,7 +19,6 @@ FMP_API_KEYS = [
 ]
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
 # Third-tier market-data provider (60 req/min free). Resilience when both
 # yfinance and FMP are unavailable. Optional; degrades gracefully if unset.

@@ -48,8 +48,6 @@ services:
         sync: false
       - key: CEREBRAS_API_KEY
         sync: false
-      - key: RESEND_API_KEY
-        sync: false
       # Supabase: persistent cache (survives Render free-tier restarts) for
       # valuations + BusinessQuant growth estimates. Optional — in-memory-only
       # cache is used if unset. See backend/services/supabase_cache.py.

@@ -1,13 +1,6 @@
 from typing import Optional, List
 from pydantic import BaseModel
 
-class EmailReportBody(BaseModel):
-    to_email: str
-    ticker: str
-    pdf_base64: str
-
-
-
 class PortfolioHolding(BaseModel):
     ticker: str
     quote_type: Optional[str] = "EQUITY"

@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import CORS_ORIGINS, FMP_API_KEYS, BUSINESSQUANT_API_KEYS, FINNHUB_API_KEY
 from routers import (analyze, investors, thesis, portfolio, screener,
-                     ownership, search, reports)
+                     ownership, search)
 
 app = FastAPI()
 
@@ -21,7 +21,6 @@ app.include_router(portfolio.router)
 app.include_router(screener.router)
 app.include_router(ownership.router)
 app.include_router(search.router)
-app.include_router(reports.router)
 
 # Printed once at import time (visible immediately in Render's deploy logs) so a
 # missing/misconfigured key set is obvious without needing dashboard access or

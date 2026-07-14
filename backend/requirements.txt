@@ -1,9 +1,11 @@
-fastapi
-uvicorn
-yfinance
-pydantic
-python-dotenv
-groq
-google-generativeai
-resend
-cerebras-cloud-sdk
+# Pinned to compatible-release ranges (~=): patch/minor updates allowed, breaking
+# major bumps blocked so a surprise upstream release can't brick a Render deploy.
+fastapi~=0.128.0
+uvicorn~=0.39.0
+yfinance~=1.2.0
+pydantic~=2.13.0
+python-dotenv~=1.1.0
+groq~=1.0.0
+google-generativeai~=0.8.6
+cerebras-cloud-sdk~=1.67.0
+slowapi~=0.1.9
