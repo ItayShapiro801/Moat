@@ -423,6 +423,13 @@ def _normalize_statement_currency(ticker, stock, info):
         return stock, info
 
 
+# Negative cache: tickers that resolved to NOTHING (invalid symbol, or no provider
+# had data) are remembered briefly so repeated hits (typos, bots) don't re-walk the
+# whole provider chain and burn paid FMP/BQ calls each time.
+_NEG_CACHE: dict[str, float] = {}
+_NEG_TTL = 10 * 60  # seconds
+
+
 @router.get("/analyze/{ticker}")
 def analyze(ticker: str):
     ticker = ticker.upper()
@@ -431,6 +438,11 @@ def analyze(ticker: str):
     cached = _valuation_cache_get(ticker)
     if cached is not None:
         return cached
+
+    # Recently-failed ticker: short-circuit without touching any provider.
+    neg = _NEG_CACHE.get(ticker)
+    if neg is not None and (_time.time() - neg) < _NEG_TTL:
+        raise HTTPException(status_code=404, detail=f"No data available for {ticker}.")
 
     # Resolve a FULL-data provider: yfinance -> FMP (full, via adapter).
     stock, info, source = _resolve_market_data(ticker)
@@ -458,6 +470,9 @@ def analyze(ticker: str):
         if quote is not None and quote.get("current_price"):
             log_source("analyze", ticker, "finnhub_quote")
             return quote
+        # Nothing, anywhere. Remember for a short window so a typo/bot doesn't
+        # re-walk the whole provider chain (and burn paid calls) on every hit.
+        _NEG_CACHE[ticker] = _time.time()
         raise HTTPException(status_code=503, detail=f"Data temporarily unavailable for {ticker}.")
 
     log_source("analyze", ticker, source)

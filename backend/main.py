@@ -1,11 +1,15 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import CORS_ORIGINS, FMP_API_KEYS, BUSINESSQUANT_API_KEYS, FINNHUB_API_KEY
+from ratelimit import rate_limit_middleware
 from routers import (analyze, investors, thesis, portfolio, screener,
                      ownership, search)
 
 app = FastAPI()
+
+# Per-IP rate limiting (public, key-less API — protect the free provider budgets).
+app.middleware("http")(rate_limit_middleware)
 
 app.add_middleware(
     CORSMiddleware,
