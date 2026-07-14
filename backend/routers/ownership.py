@@ -138,7 +138,9 @@ def insider_trades(ticker: str):
     if not cik_map:
         return _degrade()
 
-    cik = cik_map.get(ticker)
+    # SEC spells share classes with a dash (BRK.B -> BRK-B); the response/cache
+    # keep the display ticker.
+    cik = cik_map.get(ticker) or cik_map.get(ticker.replace(".", "-"))
     if not cik:
         payload = {"ticker": ticker, "trades": []}
         _INSIDER_CACHE[ticker] = (now, payload)

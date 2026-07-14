@@ -25,6 +25,13 @@ import pandas as pd
 
 from config import FMP_API_KEY, FMP_API_KEYS
 
+
+def _fmp_symbol(ticker: str) -> str:
+    """FMP spells share classes with a dash (BRK.B -> BRK-B). Normalize here so
+    every FMP entry point queries the correct symbol regardless of caller input."""
+    return (ticker or "").strip().upper().replace(".", "-")
+
+
 FMP_BASE = "https://financialmodelingprep.com/stable"
 FALLBACK_CACHE_TTL = 60  # seconds; fallback path only
 
@@ -194,6 +201,7 @@ def analyze_fallback(ticker: str) -> dict | None:
     """Degraded /analyze: price, name, sector, currency from FMP; valuation
     fields null with a note. (Full valuation needs multi-year statements the
     free tier rate-limits; intentionally not reconstructed here.)"""
+    ticker = _fmp_symbol(ticker)
     cache_key = f"analyze:{ticker}"
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -242,6 +250,7 @@ def analyze_fallback(ticker: str) -> dict | None:
 
 
 def price_history_fallback(ticker: str, period: str) -> dict | None:
+    ticker = _fmp_symbol(ticker)
     cache_key = f"price-history:{ticker}:{period}"
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -288,6 +297,7 @@ def _statement_series(rows, field):
 
 
 def financials_fallback(ticker: str) -> dict | None:
+    ticker = _fmp_symbol(ticker)
     cache_key = f"financials:{ticker}"
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -318,6 +328,7 @@ def financials_fallback(ticker: str) -> dict | None:
 
 
 def metrics_fallback(ticker: str) -> dict | None:
+    ticker = _fmp_symbol(ticker)
     cache_key = f"metrics:{ticker}"
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -485,6 +496,7 @@ def build_fmp_bundle(ticker: str):
     """Return (stock_like, info) backed by FMP for the FULL valuation engine,
     or None if FMP can't provide the essentials. Costs ~6 FMP calls (cached for
     the fallback window); the caller should layer the longer valuation cache."""
+    ticker = _fmp_symbol(ticker)
     quote = _first(_fmp_get(f"quote?symbol={ticker}")) or {}
     profile = _first(_fmp_get(f"profile?symbol={ticker}")) or {}
 

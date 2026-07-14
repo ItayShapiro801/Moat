@@ -89,10 +89,12 @@ def _d(s):
 
 
 def _cik_for(ticker: str):
-    """Reuse the ownership module's SEC ticker->CIK map (10-digit, zero-padded)."""
+    """Reuse the ownership module's SEC ticker->CIK map (10-digit, zero-padded).
+    The SEC map spells share classes with a dash (BRK.B -> BRK-B), so normalize."""
     try:
         from routers.ownership import _load_cik_map
-        return _load_cik_map().get(ticker.upper())
+        sym = (ticker or "").strip().upper().replace(".", "-")
+        return _load_cik_map().get(sym)
     except Exception:
         return None
 

@@ -23,6 +23,7 @@ from services.blend import compute_blended_valuation
 from services import fmp_fallback as fmp
 from services.fmp_fallback import is_rate_limited, log_source, build_fmp_bundle
 from services.edgar_fundamentals import build_edgar_bundle, enrich_growth
+from services.ticker_utils import normalize_ticker
 
 router = APIRouter()
 
@@ -47,8 +48,9 @@ def _fresh_price(ticker: str):
     yfinance fast_info first (free/live when not blocked), then Finnhub (free,
     uncapped). Deliberately does NOT touch FMP — we don't spend the capped budget
     just to refresh a price. Returns None if no free source answers."""
+    forms = normalize_ticker(ticker)
     try:
-        fi = yf.Ticker(ticker).fast_info
+        fi = yf.Ticker(forms.yf).fast_info
         p = float(fi["last_price"])
         if p and p > 0:
             return p
@@ -56,7 +58,7 @@ def _fresh_price(ticker: str):
         pass
     try:
         from services import finnhub_fallback as FH
-        p = FH._quote_price(ticker)
+        p = FH._quote_price(forms.finnhub)
         if p and p > 0:
             return float(p)
     except Exception:
@@ -219,6 +221,15 @@ def _is_balance_sheet_financial(info, sector) -> bool:
     highly-cash-generative business models — excluding those from the DCF (the old
     blanket sector rule) threw away the best valuation lens for them."""
     ind = (safe_get(info, "industry") or "").lower()
+    # Berkshire-type mega-cap insurance/holding conglomerates are a special case:
+    # their GAAP earnings AND book value are dominated by mark-to-market swings on
+    # a huge securities portfolio, so the bank excess-return (justified P/B) model
+    # over-values them (BRK.B -> ~$1100 on a $497 stock). Route these to the
+    # relative-value engine instead, which already anchors them on their own
+    # historical P/B (the `is_conglomerate` path). Detect: Financial-Services +
+    # >$200B cap + a "diversified"/"holding" insurer or a conglomerate name.
+    if _is_mega_insurance_conglomerate(info, sector):
+        return False  # -> DCF is sector-excluded downstream; relative P/B anchors it
     # Banks, insurers and broker-dealers/investment banks (GS/MS: "Capital
     # Markets") — all balance-sheet businesses where OCF/FCF is noise.
     if "bank" in ind or "insur" in ind or "capital market" in ind:
@@ -226,6 +237,27 @@ def _is_balance_sheet_financial(info, sector) -> bool:
     if ind:
         return False  # a known non-bank industry (payments, credit services, ...)
     return sector in FINANCIAL_SECTORS  # industry unknown: conservative default
+
+
+def _is_mega_insurance_conglomerate(info, sector) -> bool:
+    """Berkshire-type mega-cap insurance/holding conglomerate: GAAP earnings AND
+    book value are dominated by mark-to-market swings on a huge securities
+    portfolio, so BOTH an FCF DCF and the bank excess-return (justified P/B) model
+    over-value it (BRK.B -> ~$1100 on a $497 stock). These are DCF-excluded but
+    routed to the relative-value engine, which anchors them on their OWN historical
+    P/B (the `is_conglomerate` path in relative_value.py)."""
+    ind = (safe_get(info, "industry") or "").lower()
+    market_cap = safe_get(info, "marketCap", 0) or 0
+    return (
+        sector == "Financial Services" and market_cap > 200e9
+        and "insur" in ind and ("diversified" in ind or "holding" in ind)
+    )
+
+
+def _is_financial_dcf_excluded(info, sector) -> bool:
+    """True for any financial whose FCF DCF is meaningless: balance-sheet
+    financials (banks/insurers via bank_mode) OR mega insurance conglomerates."""
+    return _is_balance_sheet_financial(info, sector) or _is_mega_insurance_conglomerate(info, sector)
 
 
 def _resolve_market_data(ticker: str):
@@ -244,22 +276,26 @@ def _resolve_market_data(ticker: str):
          alive and usable when the FMP daily budget is gone.
     Returns (None, None, None) when no FULL-data provider is available (the caller
     then degrades to a quote-only response)."""
+    # Normalize the symbol once so every provider gets its expected spelling
+    # (BRK.B -> BRK-B for yfinance/FMP/SEC; Finnhub keeps the dot). Without this,
+    # dot-class tickers silently failed everywhere but Finnhub.
+    forms = normalize_ticker(ticker)
     # 1. yfinance — fast and fresh when the host IP isn't blocked.
     try:
-        stock = yf.Ticker(ticker)
+        stock = yf.Ticker(forms.yf)
         info = stock.info
         if info and (info.get("currentPrice") is not None or info.get("regularMarketPrice") is not None):
             return stock, info, "yfinance"
     except Exception:
         pass
     # 2. FMP — PRIMARY. Full valuation via the adapter; used whenever it has budget.
-    bundle = build_fmp_bundle(ticker)
+    bundle = build_fmp_bundle(forms.fmp)
     if bundle is not None:
         stock, info = bundle
         return stock, info, "fmp"
     # 3. SEC EDGAR + Finnhub — free/uncapped BACKUP, only reached once FMP is spent.
     try:
-        bundle = build_edgar_bundle(ticker)
+        bundle = build_edgar_bundle(forms.sec)
         if bundle is not None:
             stock, info = bundle
             return stock, info, "edgar"
@@ -402,7 +438,7 @@ def analyze(ticker: str):
         # to a portfolio when FMP is exhausted. Valuation fields stay null; the
         # caller/UI treats it as a price-only holding.
         from services import finnhub_fallback as _fh
-        quote = _fh.analyze_fallback(ticker)
+        quote = _fh.analyze_fallback(normalize_ticker(ticker).finnhub)
         if quote is not None and quote.get("current_price"):
             log_source("analyze", ticker, "finnhub_quote")
             return quote
@@ -484,7 +520,12 @@ def analyze(ticker: str):
     # DCF (market-implied growth) and a Monte Carlo fair-value distribution.
     # Balance-sheet financials (banks/insurers — NOT payment networks like Visa)
     # get the excess-return (justified P/B) model instead of an FCF DCF.
+    # bank_mode -> the engine's excess-return (justified P/B) model. dcf_excluded
+    # -> the DCF is meaningless (banks/insurers AND mega insurance conglomerates
+    # like BRK, which are NOT bank_mode but must still skip the FCF DCF and lean on
+    # the relative-value P/B anchor). Two distinct flags on purpose.
     bank_mode = _is_balance_sheet_financial(info, sector)
+    financial_dcf_excluded = _is_financial_dcf_excluded(info, sector)
     legacy_dcf = compute_internal_dcf(info, fcf_5yr, sector, revenue_5yr)
     f_score_early = compute_piotroski(financials, balance_sheet, cashflow, info)
     dcf_result = run_valuation_engine(
@@ -514,12 +555,16 @@ def analyze(ticker: str):
     blend = compute_blended_valuation(
         dcf_result, ext_dcf, rel_val,
         sector, current_price, fcf_5yr, info, stock,
-        low_confidence_valuation=valuation_unreliable, is_financial=bank_mode
+        low_confidence_valuation=valuation_unreliable, is_financial=financial_dcf_excluded
     )
 
     scenarios = dcf_result["scenarios"]
     base_value = scenarios["base"]["value"]
-    is_financial = bank_mode  # industry-aware: banks/insurers only, not payments
+    # Any financial whose FCF DCF is meaningless (banks/insurers via bank_mode,
+    # AND mega insurance conglomerates like BRK). For bank_mode the "internal"
+    # value IS the excess-return model, so it stays reliable; for a conglomerate
+    # the internal DCF is excluded and only relative-value P/B carries it.
+    is_financial = financial_dcf_excluded and not bank_mode
     engine_meta = dcf_result.get("engine") or {}
     dcf_reliable = engine_meta.get("dcf_reliable", True)
 
@@ -541,6 +586,7 @@ def analyze(ticker: str):
     has_external = bool(ext_dcf and ext_dcf > 0)
     internal_reliable = (
         base_value and base_value > 0
+        and not is_financial  # conglomerates: DCF excluded, relative P/B carries it
         and (dcf_is_business or not has_external or bank_mode)
     )
     # Labeled sources so the UI's Valuation Breakdown shows EXACTLY what went into
@@ -563,8 +609,11 @@ def analyze(ticker: str):
     # (AMZN/TSLA) and for FINANCIALS (where a DCF doesn't apply and P/E is the
     # standard lens — for those it's often the ONLY usable source). Included
     # whenever the company is profitable; keeps the consensus grounded in earnings.
+    # EXCEPT mega insurance conglomerates (BRK): their GAAP EPS is mark-to-market
+    # noise, so the earnings multiple is as unreliable as the DCF — lean on the
+    # relative-value P/B anchor alone, matching relative_value's conglomerate path.
     earn_mult = compute_earnings_multiple_value(info, sector, dcf_result.get("growth_rate"))
-    if earn_mult and earn_mult > 0:
+    if earn_mult and earn_mult > 0 and not _is_mega_insurance_conglomerate(info, sector):
         consensus_sources.append(("earnings_multiple", earn_mult))
 
     # Diagnostic-weighted ensemble (not a blind equal average): the DCF's weight
@@ -799,7 +848,7 @@ def price_history(ticker: str, period: str = "1y"):
 
 
 def _price_history_impl(ticker: str, period: str, ckey: str):
-    stock = yf.Ticker(ticker)
+    stock = yf.Ticker(normalize_ticker(ticker).yf)
     try:
         hist = stock.history(period=period)
     except Exception:
@@ -884,7 +933,7 @@ def financials_endpoint(ticker: str):
 
 
 def _financials_impl(ticker: str, ckey: str):
-    stock = yf.Ticker(ticker)
+    stock = yf.Ticker(normalize_ticker(ticker).yf)
     try:
         inc = stock.financials
         cf = stock.cashflow
@@ -983,7 +1032,7 @@ def metrics_endpoint(ticker: str):
 
 
 def _metrics_impl(ticker: str, ckey: str):
-    stock = yf.Ticker(ticker)
+    stock = yf.Ticker(normalize_ticker(ticker).yf)
     try:
         info = stock.info or {}
     except Exception:
