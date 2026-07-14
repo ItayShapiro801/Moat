@@ -213,6 +213,9 @@ def build_edgar_bundle(ticker: str):
     cashflow = _df(list(_CASHFLOW.keys()))
     balance_sheet = _df(list(_BALANCE.keys()))
     # Share count row goes on the balance sheet under the label the engine expects.
+    # Assign via .loc on a copy to avoid pandas' all-NA-column concat FutureWarning
+    # when the share series is sparse.
+    balance_sheet = balance_sheet.copy()
     balance_sheet.loc["Share Issued"] = [_num(series["_shares"].get(e)) for e in year_ends]
 
     # --- Market data (EDGAR has none): current price + sector/name + history ---

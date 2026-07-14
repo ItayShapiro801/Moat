@@ -164,7 +164,7 @@ def _norm_company(name):
     n = (name or "").upper()
     n = re.sub(r"[^A-Z0-9 ]", " ", n)
     for suf in [
-        "INCORPORATED", "INC", "CORPORATION", "CORP", "COMPANY", "CompanY",
+        "INCORPORATED", "INC", "CORPORATION", "CORP", "COMPANY",
         "LTD", "PLC", "HOLDINGS", "HOLDING", "GROUP", "CLASS A", "CLASS B",
         "CL A", "CL B", "COM", "THE", "CAP", "STK",
     ]:

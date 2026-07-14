@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from config import FINANCIAL_SECTORS
 from utils import *
 from services.piotroski import compute_piotroski
-from services.dcf import compute_internal_dcf, fetch_external_dcf, compute_earnings_multiple_value, fair_pe_for
+from services.dcf import compute_internal_dcf, fetch_external_dcf, compute_earnings_multiple_value
 from services.valuation_engine import run_valuation_engine, ensemble_weights
 from services.relative_value import detect_reorganization, compute_relative_value
 from services.blend import compute_blended_valuation

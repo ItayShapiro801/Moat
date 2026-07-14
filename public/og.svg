@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" fill="none">
+  <rect width="1200" height="630" fill="#0a0e14"/>
+  <defs>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#1a4d3a"/>
+    </linearGradient>
+  </defs>
+  <!-- subtle grid -->
+  <g stroke="#1f2733" stroke-width="1" opacity="0.5">
+    <line x1="0" y1="157" x2="1200" y2="157"/>
+    <line x1="0" y1="315" x2="1200" y2="315"/>
+    <line x1="0" y1="472" x2="1200" y2="472"/>
+  </g>
+  <!-- moat mark: a stylized shield/castle -->
+  <g transform="translate(96,150)">
+    <path d="M0 40 L0 150 Q0 200 60 220 Q120 200 120 150 L120 40 L96 40 L96 20 L72 20 L72 40 L48 40 L48 20 L24 40 L24 40 Z"
+          fill="url(#accent)"/>
+    <path d="M30 90 L60 70 L90 90 L90 150 Q60 168 30 150 Z" fill="#0a0e14"/>
+    <rect x="52" y="118" width="16" height="32" fill="url(#accent)"/>
+  </g>
+  <!-- wordmark + tagline -->
+  <text x="260" y="250" font-family="Inter, Segoe UI, sans-serif" font-size="120" font-weight="700" fill="#e8eaed">Moat</text>
+  <text x="264" y="320" font-family="Inter, Segoe UI, sans-serif" font-size="34" font-weight="500" fill="#34d399">Intrinsic-Value Stock Research</text>
+  <text x="96" y="470" font-family="Inter, Segoe UI, sans-serif" font-size="28" fill="#8b93a1">DCF · Reverse DCF · Monte Carlo · Moat Score · F-Score</text>
+  <text x="96" y="512" font-family="Inter, Segoe UI, sans-serif" font-size="28" fill="#8b93a1">Legendary-investor AI analysis &amp; portfolio tracking</text>
+</svg>
