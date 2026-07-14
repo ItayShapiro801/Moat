@@ -93,7 +93,7 @@ from services import supabase_cache as _sb
 # Versioned key: bump when the valuation MODEL changes so stale pre-fix numbers in
 # the persistent cache are ignored rather than served for up to a full TTL.
 # v3 = Moat Valuation Engine (CAP horizon, reverse DCF, Monte Carlo, ensemble).
-_SB_VAL_PREFIX = "valuation:v7:"
+_SB_VAL_PREFIX = "valuation:v8:"
 
 
 # A data-limited (EDGAR-backup) valuation must NOT be cached for the full 24h:
@@ -247,7 +247,15 @@ def _is_mega_insurance_conglomerate(info, sector) -> bool:
     routed to the relative-value engine, which anchors them on their OWN historical
     P/B (the `is_conglomerate` path in relative_value.py)."""
     ind = (safe_get(info, "industry") or "").lower()
+    name = (safe_get(info, "longName") or safe_get(info, "shortName") or "").lower()
     market_cap = safe_get(info, "marketCap", 0) or 0
+    # Name match is robust across providers (EDGAR/Finnhub give the generic
+    # "Financial Services" industry, not "Insurance - Diversified", AND BRK's
+    # dual-class share count corrupts market cap on the EDGAR path — so neither the
+    # industry nor the cap gate can be relied on there). Berkshire is the canonical
+    # case; keep the industry+cap heuristic for other unnamed conglomerates.
+    if sector == "Financial Services" and ("berkshire" in name):
+        return True
     return (
         sector == "Financial Services" and market_cap > 200e9
         and "insur" in ind and ("diversified" in ind or "holding" in ind)
