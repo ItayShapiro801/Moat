@@ -590,6 +590,12 @@ def build_fmp_bundle(ticker: str):
         "industry": profile.get("industry") or "",
         "quoteType": "ETF" if is_fund else "EQUITY",
         "currency": profile.get("currency") or "USD",
+        # Currency the STATEMENTS are reported in (FMP: reportedCurrency). Foreign
+        # ADRs (e.g. NVO) trade in USD but report in DKK/EUR; exposing this lets the
+        # resolver's _normalize_statement_currency convert statement values so the
+        # DCF's per-share math matches the USD price. Without it the FMP path fed
+        # DKK cash flows into a USD DCF and printed a ~$2,268 value on a $49 stock.
+        "financialCurrency": latest_inc.get("reportedCurrency") or profile.get("currency") or "USD",
         "beta": _num(profile.get("beta")) or 1.0,
         "sharesOutstanding": shares,
         "totalDebt": total_debt,

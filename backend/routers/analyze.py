@@ -276,6 +276,20 @@ def _resolve_market_data(ticker: str):
          alive and usable when the FMP daily budget is gone.
     Returns (None, None, None) when no FULL-data provider is available (the caller
     then degrades to a quote-only response)."""
+    # Resolve raw provider data, then apply currency normalization ONCE here — the
+    # single choke point — so EVERY consumer (analyze, /metrics, /financials,
+    # investor personas, thesis) sees statements in the trading currency. Doing it
+    # only inside analyze() made the rest of the page contradict itself for foreign
+    # ADRs (USD intrinsic value next to DKK charts / DKK-vs-USD ratios).
+    stock, info, source = _resolve_market_data_raw(ticker)
+    if stock is None:
+        return None, None, None
+    stock, info = _normalize_statement_currency(ticker, stock, info)
+    return stock, info, source
+
+
+def _resolve_market_data_raw(ticker: str):
+    """Provider resolution without currency normalization (see _resolve_market_data)."""
     # Normalize the symbol once so every provider gets its expected spelling
     # (BRK.B -> BRK-B for yfinance/FMP/SEC; Finnhub keeps the dot). Without this,
     # dot-class tickers silently failed everywhere but Finnhub.
@@ -385,6 +399,8 @@ def _normalize_statement_currency(ticker, stock, info):
     statement value and monetary info field into the TRADING currency so the DCF's
     per-share math is consistent with the price. No-op when currencies match or the
     FX rate is unavailable."""
+    if info.get("_fx_normalized"):
+        return stock, info  # already normalized — idempotent guard
     fin_ccy = safe_get(info, "financialCurrency")
     trade_ccy = safe_get(info, "currency") or "USD"
     if not fin_ccy or fin_ccy == trade_ccy:
@@ -446,13 +462,9 @@ def analyze(ticker: str):
 
     log_source("analyze", ticker, source)
 
-    # Currency normalization for foreign filers / ADRs. A company like Novo Nordisk
-    # (NVO) trades as a USD ADR but reports its statements in DKK — yfinance exposes
-    # this as currency=USD, financialCurrency=DKK. Feeding DKK cash flows (309B DKK
-    # revenue) into a DCF against a USD share price produced an intrinsic value of
-    # ~$2268 on a $49 stock. When the two differ, convert every statement value +
-    # monetary info field into the TRADING currency so per-share math is consistent.
-    stock, info = _normalize_statement_currency(ticker, stock, info)
+    # NOTE: currency normalization for foreign ADRs now happens inside
+    # _resolve_market_data (the single choke point), so `stock`/`info` here are
+    # already in the trading currency — no second normalization needed.
 
     # Backfill forward-ish growth from Finnhub (free/uncapped) for any source that
     # didn't supply it — notably FMP's free tier, which leaves growth None and would
