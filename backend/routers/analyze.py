@@ -1134,16 +1134,42 @@ def _metrics_impl(ticker: str, ckey: str):
             "debt_equity": debt_equity,
             "market_cap": market_cap,
         },
-        "analyst_ratings": {
-            "recommendation": g("recommendationKey"),
-            "num_analysts": g("numberOfAnalystOpinions"),
-            "target_mean_price": g("targetMeanPrice"),
-            "target_high_price": g("targetHighPrice"),
-            "target_low_price": g("targetLowPrice"),
-        },
+        # Analyst consensus from the ONE authoritative source (Finnhub), so /metrics,
+        # the analyze page and Compare all agree. Finnhub's rating is consistent
+        # regardless of which provider served the statements; yfinance price targets
+        # are layered on ONLY when genuinely present (real, not fabricated), since
+        # Finnhub's free tier doesn't include targets.
+        "analyst_ratings": _unified_analyst_ratings(ticker, g),
     }
     _data_cache_set(ckey, result)
     return result
+
+
+def _unified_analyst_ratings(ticker: str, g) -> dict:
+    """Single analyst-consensus shape used across the app. Rating comes from
+    Finnhub (consistent, cross-provider); price targets from yfinance only if
+    actually available (never fabricated)."""
+    rating = None
+    num = None
+    try:
+        from services import finnhub_fallback as _fh
+        rec = _fh.analyst_recommendation(normalize_ticker(ticker).finnhub)
+        if rec:
+            rating = rec["consensus"]          # "Buy" / "Hold" / ...
+            num = rec["total"]
+    except Exception:
+        pass
+    # Fall back to yfinance's own recommendation only if Finnhub had nothing.
+    if rating is None:
+        rating = g("recommendationKey")
+        num = g("numberOfAnalystOpinions")
+    return {
+        "recommendation": rating,
+        "num_analysts": num,
+        "target_mean_price": g("targetMeanPrice"),
+        "target_high_price": g("targetHighPrice"),
+        "target_low_price": g("targetLowPrice"),
+    }
 
 
 # ---------------------------------------------------------------------------
