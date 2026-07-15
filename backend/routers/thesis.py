@@ -326,12 +326,16 @@ def deep_research(ticker: str, refresh: bool = False):
 
 
 def _generate_deep_research(ticker: str):
-    try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Could not fetch data for {ticker}: {e}")
-    if not info or (info.get("regularMarketPrice") is None and info.get("currentPrice") is None):
+    # Use the shared resolver (yfinance -> FMP -> EDGAR+Finnhub) like every other
+    # endpoint. This previously called yf.Ticker() directly and 404'd the whole
+    # report whenever Yahoo rate-limited the host IP ("Could not fetch data for
+    # DAL: Too Many Requests") — even though /analyze served that same ticker fine
+    # from EDGAR. The resolver also applies ticker + currency normalization.
+    from routers.analyze import _resolve_market_data
+    stock, info, _src = _resolve_market_data(ticker)
+    if stock is None or not info or (
+        info.get("regularMarketPrice") is None and info.get("currentPrice") is None
+    ):
         raise HTTPException(status_code=404, detail=f"No data found for ticker {ticker}")
 
     # Gather everything (best-effort; never crash the report on a sub-fetch)
