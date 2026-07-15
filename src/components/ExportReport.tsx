@@ -81,6 +81,26 @@ export function ExportReport({
     // earlier instead of overflowing.
     const WRAP_SLACK = 12;
 
+    // The LLM writes typographic Unicode: narrow/no-break spaces inside figures
+    // ("$12.1<U+202F>B"), non-breaking hyphens, curly quotes, en/em dashes. jsPDF's
+    // built-in Helvetica is WinAnsi and has no glyph for most of them, so it
+    // measured them (16.65pt vs 14.4pt for a real space) but drew a substitute —
+    // the measured width no longer matched the drawn width, which is what stretched
+    // the first line of each block past the page edge. Worse, the no-break variants
+    // are by definition unbreakable, so splitTextToSize could not wrap them at all.
+    // Fold everything to the ASCII equivalent BEFORE measuring or drawing.
+    const pdfSafe = (s: string) =>
+      (s || "")
+        .replace(/[\u00A0\u2007\u2009\u202F\u2060\u3000]/g, " ") // no-break/thin spaces
+        .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-") // hyphens, dashes, minus
+        .replace(/[\u2018\u2019\u201B]/g, "'")
+        .replace(/[\u201C\u201D\u201E]/g, '"')
+        .replace(/\u2026/g, "...")
+        .replace(/[\u200B\u200C\u200D\uFEFF]/g, "") // zero-width
+        .replace(/[\u2022\u00B7]/g, "-") // bullets
+        .replace(/\s+/g, " ")
+        .trim();
+
     const ensure = (need: number) => {
       if (y + need > H - 56) {
         doc.addPage();
@@ -123,7 +143,7 @@ export function ExportReport({
       doc.setFont("helvetica", "normal");
       doc.setFontSize(10);
       setColor(INK);
-      const lines = doc.splitTextToSize(text, W - 2 * M - WRAP_SLACK);
+      const lines = doc.splitTextToSize(pdfSafe(text), W - 2 * M - WRAP_SLACK);
       lines.forEach((ln: string) => {
         ensure(14);
         doc.text(ln, M, y);
@@ -283,7 +303,7 @@ export function ExportReport({
         setColor(INK);
         const scoreTxt =
           inv.score != null ? `  ${inv.score}/10` : "";
-        doc.text(`${inv.name}${scoreTxt} — ${inv.verdict || "—"}`, M, y);
+        doc.text(pdfSafe(`${inv.name}${scoreTxt} — ${inv.verdict || "—"}`), M, y);
         y += 14;
         doc.setFont("helvetica", "normal");
         doc.setFontSize(9);
@@ -297,7 +317,7 @@ export function ExportReport({
           setColor(labelColor);
           doc.text(label, M, y);
           setColor(INK);
-          const lines = doc.splitTextToSize(text, W - 2 * M - INDENT - WRAP_SLACK);
+          const lines = doc.splitTextToSize(pdfSafe(text), W - 2 * M - INDENT - WRAP_SLACK);
           lines.forEach((ln: string, i: number) => {
             if (i > 0) ensure(12);  // first line sits next to the label
             doc.text(ln, M + INDENT, y);
