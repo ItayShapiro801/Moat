@@ -287,23 +287,27 @@ export function ExportReport({
         y += 14;
         doc.setFont("helvetica", "normal");
         doc.setFontSize(9);
-        if (inv.bull_case) {
-          setColor(GREEN);
-          doc.text("Bull:", M, y);
+        // Draw a labelled, indented block ONE LINE AT A TIME. Passing the whole
+        // array to doc.text() renders it in a single call that neither advances y
+        // per line nor page-breaks, so a long case ran past the page edge/bottom.
+        // The indent is INDENT wide, so the wrap width must subtract it once (the
+        // text starts at M+INDENT and must stop at W-M) — not twice.
+        const INDENT = 30;
+        const caseBlock = (label: string, text: string, labelColor: readonly number[]) => {
+          setColor(labelColor);
+          doc.text(label, M, y);
           setColor(INK);
-          const lines = doc.splitTextToSize(inv.bull_case, W - 2 * M - 30 - WRAP_SLACK);
-          doc.text(lines, M + 30, y);
-          y += lines.length * 11 + 4;
-        }
+          const lines = doc.splitTextToSize(text, W - 2 * M - INDENT - WRAP_SLACK);
+          lines.forEach((ln: string, i: number) => {
+            if (i > 0) ensure(12);  // first line sits next to the label
+            doc.text(ln, M + INDENT, y);
+            y += 11;
+          });
+          y += 4;
+        };
+        if (inv.bull_case) caseBlock("Bull:", inv.bull_case, GREEN);
         ensure(30);
-        if (inv.bear_case) {
-          setColor(RED);
-          doc.text("Bear:", M, y);
-          setColor(INK);
-          const lines = doc.splitTextToSize(inv.bear_case, W - 2 * M - 30 - WRAP_SLACK);
-          doc.text(lines, M + 30, y);
-          y += lines.length * 11 + 10;
-        }
+        if (inv.bear_case) caseBlock("Bear:", inv.bear_case, RED);
       });
     }
 
